@@ -1,0 +1,155 @@
+<svg viewBox="0 0 1800 1400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 16px; font-weight: bold; fill: #000000; text-anchor: middle; }
+      .subtitle-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 12px; fill: #000000; text-anchor: middle; }
+      .decision-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 14px; font-weight: bold; fill: #000000; text-anchor: middle; }
+      .edge-label { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 11px; fill: #000000; text-anchor: middle; }
+      .box { stroke: #000000; stroke-width: 2; }
+      .diamond { stroke: #000000; stroke-width: 2; }
+      .cylinder { stroke: #000000; stroke-width: 2; }
+      .arrow { stroke: #000000; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#000000" />
+    </marker>
+  </defs>
+
+  <!-- Input Directory -->
+  <rect x="50" y="40" width="180" height="70" rx="5" class="box" fill="#e1f5fe"/>
+  <text x="140" y="65" class="title-text">Image Directory</text>
+  <text x="140" y="85" class="subtitle-text">D:\images</text>
+
+  <!-- Main Entry Point -->
+  <rect x="400" y="40" width="150" height="70" rx="5" class="box" fill="#ffffff"/>
+  <text x="475" y="65" class="title-text">main.py</text>
+  <text x="475" y="85" class="subtitle-text">Entry Point</text>
+
+  <!-- Mode Selection Decision -->
+  <polygon points="475,180 540,210 475,240 410,210" class="diamond" fill="#ffebee"/>
+  <text x="475" y="215" class="decision-text">Mode Selection</text>
+
+  <!-- Pipeline Modules -->
+  <rect x="40" y="360" width="220" height="70" rx="5" class="box" fill="#ffffff"/>
+  <text x="150" y="385" class="title-text">feature_extraction_pipeline.py</text>
+  <text x="150" y="405" class="subtitle-text">Learning Mode</text>
+
+  <rect x="380" y="360" width="220" height="70" rx="5" class="box" fill="#ffffff"/>
+  <text x="490" y="385" class="title-text">similarity_search_pipeline.py</text>
+  <text x="490" y="405" class="subtitle-text">Comparison Mode</text>
+
+  <rect x="720" y="360" width="200" height="70" rx="5" class="box" fill="#ffffff"/>
+  <text x="820" y="385" class="title-text">interactive_pipeline.py</text>
+  <text x="820" y="405" class="subtitle-text">Interactive Mode</text>
+
+  <!-- MultiFeatureExtractor -->
+  <rect x="70" y="520" width="160" height="50" rx="5" class="box" fill="#ffffff"/>
+  <text x="150" y="540" class="title-text">MultiFeatureExtractor</text>
+  <text x="150" y="560" class="subtitle-text">Feature Processing</text>
+
+  <!-- Feature Types -->
+  <rect x="20" y="680" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="90" y="700" class="title-text">EfficientNet</text>
+  <text x="90" y="720" class="subtitle-text">2560 dimensions</text>
+
+  <rect x="200" y="680" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="270" y="700" class="title-text">HSV Histogram</text>
+  <text x="270" y="720" class="subtitle-text">32³ bins</text>
+
+  <rect x="380" y="680" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="450" y="700" class="title-text">LBP Features</text>
+  <text x="450" y="720" class="subtitle-text">26 bins</text>
+
+  <rect x="560" y="680" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="630" y="700" class="title-text">ORB Descriptors</text>
+  <text x="630" y="720" class="subtitle-text">500 features</text>
+
+  <!-- Storage -->
+  <ellipse cx="360" cy="880" rx="140" ry="40" class="cylinder" fill="#f3e5f5"/>
+  <text x="360" y="875" class="title-text">Pickle Files</text>
+  <text x="360" y="895" class="subtitle-text">D:\Code_image_rec\pickles</text>
+
+  <ellipse cx="120" cy="880" rx="80" ry="40" class="cylinder" fill="#fff3e0"/>
+  <text x="120" y="875" class="title-text">SQLite DB</text>
+  <text x="120" y="895" class="subtitle-text">metadata.db</text>
+
+  <!-- Similarity Search -->
+  <rect x="800" y="680" width="180" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="890" y="700" class="title-text">SmartSimilaritySearch</text>
+  <text x="890" y="720" class="subtitle-text">Core Search Engine</text>
+
+  <!-- FAISS Decision -->
+  <polygon points="890,820 950,850 890,880 830,850" class="diamond" fill="#ffebee"/>
+  <text x="890" y="855" class="decision-text">FAISS Available?</text>
+
+  <!-- Search Methods -->
+  <rect x="1080" y="980" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="1150" y="1000" class="title-text">FAISS Indices</text>
+  <text x="1150" y="1020" class="subtitle-text">Fast Search</text>
+
+  <rect x="740" y="980" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="810" y="1000" class="title-text">Direct Computation</text>
+  <text x="810" y="1020" class="subtitle-text">Slower but Works</text>
+
+  <!-- Results -->
+  <rect x="900" y="1140" width="140" height="60" rx="5" class="box" fill="#e8f5e8"/>
+  <text x="970" y="1160" class="title-text">Similarity Results</text>
+  <text x="970" y="1180" class="subtitle-text">Ranked Output</text>
+
+  <!-- Interactive GUI -->
+  <rect x="1200" y="360" width="180" height="70" rx="5" class="box" fill="#ffffff"/>
+  <text x="1290" y="385" class="title-text">Interactive GUI</text>
+  <text x="1290" y="405" class="subtitle-text">tkinter file picker</text>
+
+  <rect x="1200" y="520" width="180" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="1290" y="540" class="title-text">Real-time Feature</text>
+  <text x="1290" y="560" class="subtitle-text">Extraction</text>
+
+  <!-- Display -->
+  <rect x="1220" y="1140" width="140" height="60" rx="5" class="box" fill="#ffffff"/>
+  <text x="1290" y="1160" class="title-text">Visual Display</text>
+  <text x="1290" y="1180" class="subtitle-text">matplotlib</text>
+
+  <!-- Arrows -->
+  <line x1="230" y1="75" x2="400" y2="75" class="arrow"/>
+  <line x1="475" y1="110" x2="475" y2="180" class="arrow"/>
+  
+  <line x1="440" y1="210" x2="150" y2="360" class="arrow"/>
+  <text x="295" y="285" class="edge-label">learning</text>
+  
+  <line x1="475" y1="240" x2="490" y2="360" class="arrow"/>
+  <text x="483" y="300" class="edge-label">comparison</text>
+  
+  <line x1="510" y1="210" x2="820" y2="360" class="arrow"/>
+  <text x="665" y="285" class="edge-label">interactive</text>
+
+  <line x1="150" y1="430" x2="150" y2="520" class="arrow"/>
+  <line x1="150" y1="570" x2="90" y2="680" class="arrow"/>
+  <line x1="150" y1="570" x2="270" y2="680" class="arrow"/>
+  <line x1="150" y1="570" x2="450" y2="680" class="arrow"/>
+  <line x1="150" y1="570" x2="630" y2="680" class="arrow"/>
+
+  <line x1="90" y1="740" x2="290" y2="850" class="arrow"/>
+  <line x1="270" y1="740" x2="340" y2="850" class="arrow"/>
+  <line x1="450" y1="740" x2="390" y2="850" class="arrow"/>
+  <line x1="630" y1="740" x2="430" y2="850" class="arrow"/>
+
+  <line x1="150" y1="430" x2="120" y2="840" class="arrow"/>
+  <line x1="360" y1="920" x2="890" y2="740" class="arrow"/>
+  <line x1="200" y1="880" x2="830" y2="740" class="arrow"/>
+
+  <line x1="890" y1="820" x2="890" y2="740" class="arrow"/>
+  <line x1="930" y1="850" x2="1150" y2="980" class="arrow"/>
+  <text x="1040" y="915" class="edge-label">Yes</text>
+  
+  <line x1="850" y1="850" x2="810" y2="980" class="arrow"/>
+  <text x="830" y="915" class="edge-label">No</text>
+
+  <line x1="1150" y1="1040" x2="970" y2="1140" class="arrow"/>
+  <line x1="810" y1="1040" x2="970" y2="1140" class="arrow"/>
+
+  <line x1="820" y1="430" x2="1290" y2="430" class="arrow"/>
+  <line x1="1290" y1="430" x2="1290" y2="520" class="arrow"/>
+  <line x1="1290" y1="580" x2="890" y2="680" class="arrow"/>
+  <line x1="970" y1="1200" x2="1290" y2="1200" class="arrow"/>
+</svg>

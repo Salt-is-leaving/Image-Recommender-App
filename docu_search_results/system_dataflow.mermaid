@@ -1,0 +1,42 @@
+graph TD
+    A[Image Directory<br/>D:\images] --> B[main.py<br/>Entry Point]
+    
+    B --> C{Mode Selection}
+    C -->|learning| D[feature_extraction_pipeline.py]
+    C -->|comparison| E[similarity_search_pipeline.py]
+    C -->|interactive| F[intaractive_pipeline.py]
+    
+    D --> G[MultiFeatureExtractor]
+    G --> H[EfficientNet<br/>2560 dims]
+    G --> I[HSV Histogram<br/>32³ bins]
+    G --> J[LBP Features<br/>26 bins]
+    G --> K[ORB Descriptors<br/>500 features]
+    
+    H --> L[(Pickle Files<br/>D:\Code_image_rec\pickles)]
+    I --> L
+    J --> L
+    K --> L
+    
+    D --> M[(SQLite DB<br/>metadata.db)]
+    M --> N[Image Metadata<br/>paths, sizes, flags]
+    
+    L --> O[SmartSimilaritySearch]
+    M --> O
+    
+    O --> P{FAISS Available?}
+    P -->|Yes| Q[FAISS Indices<br/>Fast Search]
+    P -->|No| R[Direct Computation<br/>Slower but Works]
+    
+    Q --> S[Similarity Results]
+    R --> S
+    S --> T[Visual Display<br/>matplotlib]
+    
+    F --> U[Interactive GUI<br/>tkinter file picker]
+    U --> V[Real-time Feature<br/>Extraction]
+    V --> O
+    
+    style A fill:#e1f5fe
+    style L fill:#f3e5f5
+    style M fill:#fff3e0
+    style P fill:#ffebee
+    style S fill:#e8f5e8
