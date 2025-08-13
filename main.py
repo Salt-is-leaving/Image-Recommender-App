@@ -1,19 +1,20 @@
-
 import os
 import sys
 import logging
+import time
 import argparse
 from pathlib import Path
+
 
 # Add current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from dynamic_weights_optimizer import print_weight_analysis_report, get_optimal_similarity_weights
 from config import (PATH_TO_SSD, PICKLE_PATH, DB_PATH, FEATURE_FILES, 
-                   get_clustering_status)
+                    get_global_cache, get_clustering_status)
 from db_api import create_connection, create_tables, get_feature_completeness
 from feature_extraction_pipeline import learning_mode
-from clustering import run_clustering  # NEW IMPORT
+from clustering import run_clustering  
 from similarity_search_pipeline import comparison_mode
 from interactive_pipeline import run_interactive_mode
 from ranking_viz import run_ranking_visualization
@@ -71,18 +72,21 @@ def show_system_status():
     else:
         logging.info(f"Image directory not found: {PATH_TO_SSD}")
     
-    # Check database
+    # Check database with corrected function call
     try:
         conn = create_connection()
         if conn:
             stats = get_feature_completeness(conn)
-            if stats:
+            if stats and stats['all']:  #  use 'all' key
+                overall = stats['all']
                 logging.info(f"Database status:")
-                logging.info(f"Total images: {stats[0]}")
-                logging.info(f"Complete features: {stats[5]}")
+                logging.info(f"  Total images: {overall[0]}")
+                logging.info(f"  HSV features: {overall[1]}")
+                logging.info(f"  ConvNeXt features: {overall[2]}")
+                logging.info(f"  Complete features: {overall[3]}")
             conn.close()
-    except:
-        logging.info("Database connection failed")
+    except Exception as e:
+        logging.info(f"Database connection failed: {e}")
     
     # Check pickle files
     logging.info("Feature files:")
@@ -90,9 +94,9 @@ def show_system_status():
         filepath = os.path.join(PICKLE_PATH, filename)
         if os.path.exists(filepath):
             size_mb = os.path.getsize(filepath) / 1024 / 1024
-            logging.info(f" {filename}: {size_mb:.2f} MB")
+            logging.info(f"  {filename}: {size_mb:.2f} MB")
         else:
-            logging.info(f" {filename}: Not found")
+            logging.info(f"  {filename}: Not found")
     
     # Check clustering
     cluster_file = os.path.join(PICKLE_PATH, 'cluster_data.pkl')
@@ -177,7 +181,6 @@ def run_weight_analysis_mode(args):
         import traceback
         traceback.print_exc()
         return False
-
 
 def run_learning_mode(args):
     """Run feature extraction learning mode."""
@@ -312,7 +315,7 @@ def run_comparison_mode(args):
     
     try:
         success = comparison_mode(
-            target_image_id=args.target_image,
+            target_image_path=args.target_image,
             use_gpu=args.cuda and not args.no_gpu,
             compare_all_methods=True,
             enable_clustering=use_clustering
@@ -341,6 +344,7 @@ def run_interactive_mode_wrapper(args):
         logging.info("Clustering-first search available")
     else:
         logging.warning("Clustering not available")
+        return False
         
     try:
         success = run_interactive_mode(
@@ -425,7 +429,6 @@ def parse_arguments():
     parser.add_argument(
         '--mode', 
         choices=['learning', 'comparison', 'interactive', 'clustering', 'vis', 'weights'],
-        default='interactive',
         help='Operation mode to run'
     )
     
@@ -494,11 +497,20 @@ def main():
         show_system_status()
         return 0
     
+    # Require mode to be specified
+    if args.mode is None:
+        print("Error: --mode is required")
+        print("\nQuick start:")
+        print("1. python main.py --mode learning     # Extract features first")
+        print("2. python main.py --mode clustering   # Create clusters")
+        print("3. python main.py --mode interactive  # Search images")
+        print("\nUse --help for more options")
+        return 1
+    
     # Check system requirements
     if not check_system_requirements():
         logging.error("System requirements check failed")
         return 1
-    
     success = True
     
     # Learning phase
@@ -506,19 +518,19 @@ def main():
         success &= run_learning_mode(args)
     
     # Clustering phase
-    if args.mode == 'clustering':
+    elif args.mode == 'clustering':
         success &= run_clustering_mode(args)
     
     # Comparison phase
-    if args.mode == 'comparison':
+    elif args.mode == 'comparison':
         success &= run_comparison_mode(args)
     
     # Interactive phase
-    if args.mode == 'interactive':
+    elif args.mode == 'interactive':
         success &= run_interactive_mode_wrapper(args)
 
     # Visualisation phase
-    if args.mode == 'vis':
+    elif args.mode == 'vis':
         success &= run_vis_mode_wrapper(args)
     
     # Final status and guidance
@@ -526,7 +538,6 @@ def main():
         logging.info("=== ALL OPERATIONS COMPLETED SUCCESSFULLY ===")
         
         # Provide specific guidance based on mode
-       
         if args.mode == 'clustering':
             logging.info("Clustering completed successfully!")
             logging.info("Now you can use similarity search:")
@@ -545,7 +556,6 @@ def main():
 
         elif args.mode == 'vis':
             logging.info("Ranking visualization completed!")
-        
         return 0
     else:
         logging.error("=== SOME OPERATIONS FAILED ===")

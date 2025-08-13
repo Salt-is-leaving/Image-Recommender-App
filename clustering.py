@@ -2,11 +2,12 @@ import os
 import numpy as np
 import pickle
 import logging
+import gc 
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler, normalize
 from sklearn.decomposition import PCA
 
-from config import PICKLE_PATH, get_cluster_config
+from config import PICKLE_PATH, PERFORMANCE_CONFIGS, get_cluster_config, get_global_cache
 from db_api import load_features_from_pickle
 
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,7 @@ class ClusteringPipeline:
         self.scalers = {}
         self.cluster_assignments = {} # image_path -> cluster_id
         self.cluster_centers = {}
+        self.cache = get_global_cache()
     
     def load_all_features(self):
         """Load features and find common image paths."""
@@ -39,7 +41,7 @@ class ClusteringPipeline:
         return features_data, common_image_paths
     
     def preprocess_features(self, features_dict, feature_type, image_paths):
-        """Preprocess features: standardize, PCA, normalize."""
+        """Preprocess features: standardize, PCA, normalize with PCA logic."""
         config = get_cluster_config(feature_type)
         
         # Convert to matrix
@@ -56,11 +58,121 @@ class ClusteringPipeline:
             return None, None
         
         feature_matrix = np.array(feature_list)
+        n_samples, n_features = feature_matrix.shape
         
         if feature_type == 'convnext':
+            norms = np.linalg.norm(feature_matrix, axis=1)
+            logging.info(f"ConvNeXt norms preserved")
+            
+            # Check if we now have proper variation in the ORIGINAL magnitudes
+            norm_std = np.std(norms)
+            if norm_std > 0.1:
+                logging.info(f"Good norm variation in raw features: std={norm_std:.3f}")
+            else:
+                logging.warning(f"Still low norm variation: std={norm_std:.3f}")
+        else:
+            # Apply standardization for other features (HSV)
+            scaler = StandardScaler()
+            feature_matrix = scaler.fit_transform(feature_matrix)
+            self.scalers[feature_type] = scaler
+        
+        # PCA: Check dimensions before applying
+        pca_dims = config['pca_dimensions']
+        max_possible_dims = min(n_samples - 1, n_features)  # Maximum PCA dimensions possible
+        
+        if feature_matrix.shape[1] > pca_dims and n_samples > pca_dims:
+            # Only apply PCA if we have enough samples
+            actual_pca_dims = min(pca_dims, max_possible_dims)
+            
+            pca = PCA(n_components=actual_pca_dims, random_state=42)
+            try:
+                feature_matrix = pca.fit_transform(feature_matrix)
+                self.pca_models[feature_type] = pca
+                explained_var = np.sum(pca.explained_variance_ratio_)
+                logging.info(f"PCA applied for {feature_type}: {feature_matrix.shape[1]} dims, "
+                        f"{explained_var:.3f} variance explained")
+            except Exception as e:
+                logging.error(f"PCA failed for {feature_type}: {e}")
+                logging.info(f"Skipping PCA due to insufficient data (samples: {n_samples}, features: {n_features})")
+                self.pca_models[feature_type] = None
+        else:
+            self.pca_models[feature_type] = None
+            if n_samples <= pca_dims:
+                logging.info(f"Skipping PCA for {feature_type}: insufficient samples ({n_samples} <= {pca_dims})")
+            else:
+                logging.info(f"No PCA needed for {feature_type}: {feature_matrix.shape[1]} <= {pca_dims}")
+        
+        # Apply final normalization L1 only to HSV (it will maintain hist. probability distribution)
+        if feature_type == 'hsv':
+            normalization = config.get('normalization', 'none')
+            if normalization == 'l1':
+                feature_matrix = feature_matrix / (np.sum(np.abs(feature_matrix), axis=1, keepdims=True) + 1e-8)
+                logging.debug(f"L1 normalization applied for HSV")
+                logging.debug(f"Skipping clustering normalization for ConvNeXt (already L2 normalized)")
+        return feature_matrix, valid_paths
+
+    def process_in_chunks(self, features_dict, feature_type, image_paths, config):
+        """Process large datasets in chunks."""
+        chunk_size = PERFORMANCE_CONFIGS.get('memory_management', {}).get('chunk_size', 1000)
+        logging.info(f"Processing {len(image_paths)} images in chunks of {chunk_size}")
+        
+        all_features = []
+        all_valid_paths = []
+        
+        for chunk_start in range(0, len(image_paths), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(image_paths))
+            chunk_paths = image_paths[chunk_start:chunk_end]
+            
+            # Process chunk
+            feature_list = []
+            valid_paths = []
+            
+            for image_path in chunk_paths:
+                if image_path in features_dict and features_dict[image_path] is not None:
+                    feature = features_dict[image_path]
+                    feature_list.append(feature.flatten().astype(np.float32))
+                    valid_paths.append(image_path)
+            
+            if feature_list:
+                chunk_matrix = np.array(feature_list)
+                all_features.append(chunk_matrix)
+                all_valid_paths.extend(valid_paths)
+                
+                # Clear chunk data
+                del feature_list
+                gc.collect()
+        
+        if not all_features:
+            return None, None
+        
+        # Combine chunks
+        feature_matrix = np.vstack(all_features) if len(all_features) > 1 else all_features[0]
+        del all_features
+        gc.collect()
+        return self.apply_preprocessing(feature_matrix, feature_type, config), all_valid_paths
+    
+    def process_normally(self, features_dict, feature_type, image_paths, config):
+        """Normal processing for smaller datasets."""
+        # This is basically our existing preprocess_features logic
+        feature_list = []
+        valid_paths = []
+        
+        for image_path in image_paths:
+            if image_path in features_dict and features_dict[image_path] is not None:
+                feature = features_dict[image_path]
+                feature_list.append(feature.flatten().astype(np.float32))
+                valid_paths.append(image_path)
+        
+        if not feature_list:
+            return None, None
+        
+        feature_matrix = np.array(feature_list)
+        return self.apply_preprocessing(feature_matrix, feature_type, config), valid_paths
+    
+    def apply_preprocessing(self, feature_matrix, feature_type, config):
+        """Apply preprocessing steps - extracted from your existing preprocess_features."""
+        if feature_type == 'convnext':
             logging.info(f"Skipping standardization for ConvNeXt to preserve extractor normalization")
-        # ConvNeXt features are already properly normalized by our extractor
-        # Just validate they look reasonable
             norms = np.linalg.norm(feature_matrix, axis=1)
             logging.info(f"ConvNeXt norms range: {np.min(norms):.3f} - {np.max(norms):.3f}")
         
@@ -69,7 +181,7 @@ class ClusteringPipeline:
             else:
                 logging.info("ConvNeXt features have good norm diversity")     
         else:
-        # Apply standardization for other features (HSV)
+            # Apply standardization for other features (HSV)
             scaler = StandardScaler()
             feature_matrix = scaler.fit_transform(feature_matrix)
             self.scalers[feature_type] = scaler
@@ -86,7 +198,7 @@ class ClusteringPipeline:
                            f"{explained_var:.3f} variance explained")
             except Exception as e:
                 logging.error(f"PCA failed for {feature_type}: {e}")
-                return None, None
+                return None
         else:
             self.pca_models[feature_type] = None
             logging.info(f"No PCA needed for {feature_type}: {feature_matrix.shape[1]} <= {pca_dims}")
@@ -97,15 +209,10 @@ class ClusteringPipeline:
             if normalization == 'l1':
                 feature_matrix = feature_matrix / (np.sum(np.abs(feature_matrix), axis=1, keepdims=True) + 1e-8)
                 logging.debug(f"L1 normalization applied for HSV")
-        elif feature_type == 'convnext': 
+        elif feature_type == 'convnext':
             # Skip normalization for ConvNeXt - already L2 normalized by extractor
             logging.debug(f"Skipping clustering normalization for ConvNeXt (already L2 normalized)")
-        else:
-            # L2 normalization for other deep features
-            if normalization == 'l2':
-                feature_matrix = normalize(feature_matrix, norm='l2')
-                logging.debug(f"L2 normalization applied for {feature_type}")
-        return feature_matrix, valid_paths
+        return feature_matrix
     
     def cluster_features(self, feature_matrix, feature_type, image_paths):
         """Perform K-means clustering."""
@@ -193,7 +300,7 @@ class ClusteringPipeline:
             else:
                 query_pca = query_processed
             
-            # FIXED: Consistent query normalization
+            # Consistent query normalization
             config = get_cluster_config(feature_type)
             normalization = config.get('normalization', 'none')
             
@@ -209,24 +316,18 @@ class ClusteringPipeline:
                 query_norm = query_pca
                 logging.debug("Skipping clustering normalization for ConvNeXt query (already L2 normalized)")
             else:
-                # L2 normalization for other features
-                if normalization == 'l2':
-                    query_norm = normalize(query_pca, norm='l2')
-                    logging.debug("L2 normalization applied for query")
-                else:
-                    query_norm = query_pca
+                query_norm = query_pca
+            
             result = query_norm[0]
             
             # Final validation
             if not np.isfinite(result).all():
                 logging.error(f"Preprocessed query feature contains invalid values for {feature_type}")
                 return None
-            
             return result
-            
         except Exception as e:
             logging.error(f"Error preprocessing query feature {feature_type}: {e}")
-        return None
+            return None
     
     def assign_query_to_clusters(self, query_features, top_k_clusters=3):
         """Assign query to clusters for each feature type."""
@@ -238,10 +339,14 @@ class ClusteringPipeline:
             
             query_processed = self.preprocess_query_feature(query_feature, feature_type)
             if query_processed is None:
+                print(f"DEBUG: Query preprocessing failed for {feature_type}")
                 continue
             
             centers = self.cluster_centers[feature_type] # Calculate distances to cluster centers
             distances = np.linalg.norm(centers - query_processed, axis=1)
+            print(f"DEBUG {feature_type}: Query processed shape: {query_processed.shape}")
+            print(f"DEBUG {feature_type}: Centers shape: {centers.shape}")
+            print(f"DEBUG {feature_type}: Distance range: [{distances.min():.4f}, {distances.max():.4f}]")
             nearest_indices = np.argsort(distances)[:top_k_clusters]
             
             cluster_candidates = []
@@ -252,38 +357,45 @@ class ClusteringPipeline:
                 })
             
             cluster_assignments[feature_type] = cluster_candidates
-        
         return cluster_assignments
     
     def run_clustering_pipeline(self):
-        logging.info("Starting clustering pipeline...")
+        """Optimized clustering pipeline with chunked processing."""
+        logging.info("Starting optimized clustering pipeline...")
         
-        # Load features
+        # Clear old cache
+        self.cache.clear_old_cache()
+        
+        # Load features (existing logic)
         features_data, common_image_paths = self.load_all_features()
         if not features_data or len(common_image_paths) < 10:
             logging.error("Insufficient features for clustering")
             return False
         
-        # Process each feature type
+        # Process each feature type with chunking
         for feature_type in self.feature_types:
             if feature_type not in features_data:
                 continue
             
-            logging.info(f"Processing {feature_type}...")
+            logging.info(f"Processing {feature_type} with chunked processing...")
             
-            # Preprocess
+            # Use chunked preprocessing instead of regular preprocessing
             feature_matrix, valid_paths = self.preprocess_features(
                 features_data[feature_type], feature_type, common_image_paths
             )
             
             if feature_matrix is not None:
                 self.cluster_features(feature_matrix, feature_type, valid_paths)
-        
+                
+                # Clear large objects
+                del feature_matrix
+                gc.collect()
+           
         # Save results
         success = self.save_clustering_data()
         if success:
-            logging.info("Clustering pipeline completed successfully")
-            return success
+            logging.info("Optimized clustering pipeline completed successfully")
+        return success
 
 def run_clustering():
     """Main function to run clustering."""

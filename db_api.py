@@ -5,6 +5,18 @@ import os
 import numpy as np
 from config import BASE_PATH, PICKLE_PATH, PATH_TO_SSD
 
+def get_feature_file_path(feature_type):
+    """Get file path for any feature type."""
+    filename_map = {
+        'convnext': 'convnext_features.pkl',
+        'hsv': 'hsv_features.pkl',
+        'combined': 'combined_features.pkl'
+    }
+    filename = filename_map.get(feature_type, f"{feature_type}_features.pkl")
+    return os.path.join(PICKLE_PATH, filename)
+
+
+
 DB_PATH = os.path.join(BASE_PATH, 'metadata.db')
 
 def create_connection(db_file=None):
@@ -398,7 +410,6 @@ def get_category_aware_similar_candidates(conn, target_image_path, same_category
         return []
 
 # ========== FEATURE FILE MANAGEMENT (CONSISTENT NAMING) ==========
-
 def get_feature_pickle_path(feature_type):
     """Get consistent pickle file path for feature type."""
     filename_map = {
@@ -410,7 +421,7 @@ def get_feature_pickle_path(feature_type):
 
 def save_features_to_pickle(features_dict, feature_type):
     """Save features dictionary to pickle file path-based naming"""
-    filepath = get_feature_pickle_path(feature_type)
+    filepath = get_feature_file_path(feature_type)
     try:
         # Load existing features if file exists
         existing_features = {}
@@ -436,7 +447,7 @@ def save_features_to_pickle(features_dict, feature_type):
 
 def load_features_from_pickle(feature_type):
     """Load features dictionary from pickle file."""
-    filepath = get_feature_pickle_path(feature_type)
+    filepath = get_feature_file_path(feature_type)
     try:
         if not os.path.exists(filepath):
             return {}
@@ -451,7 +462,6 @@ def load_features_from_pickle(feature_type):
         return {}
 
 # ========== FEATURE SIMILARITY COMPUTATION ==========
-
 def get_weighted_similarity_with_categories(target_path, weights=None, same_category_boost=0.1):
     """Enhanced similarity search with semantic category boosting."""
     if weights is None:

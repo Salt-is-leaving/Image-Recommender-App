@@ -1,9 +1,17 @@
 import os
 import logging
-
+import time
+import psutil
+import hashlib
+import json
+import gc
+from contextlib import contextmanager
+import pickle
+#from db_api import get_feature_pickle_path
+ 
 # Base paths
 BASE_PATH = r"D:\Code_image_rec"
-PATH_TO_SSD =  r"E:\data"  #r"D:\images"
+PATH_TO_SSD =  r"D:\images" #r"E:\data"  
 
 # Database path (metadata.db is in the main directory)
 DB_PATH = os.path.join(BASE_PATH, 'metadata.db')
@@ -230,6 +238,15 @@ PERFORMANCE_CONFIGS = {
         'lazy_loading': True,
         'compression_level': 6,         # Balance between speed and storage
         'memory_mapping': True         # For large datasets
+    },
+     'caching': {
+        'enable_index_cache': True,   # Cache FAISS indices
+        'cache_max_age_days': 7,      # Auto-cleanup
+        'memory_cache_size': 1000,    # Items in memory
+    },
+    'batch_processing': {
+        'batch_search_size': 32,      # FAISS batch size
+        'parallel_processing': True,   # Enable batching
     }
 }
 
@@ -262,7 +279,7 @@ def get_total_images(path_to_ssd=None):
     except Exception as e:
         print(f"Error counting images: {e}")
         return 0
-
+    
 def get_processed_image_count():
     """Get count of processed images from feature files."""
     counts = {}
@@ -279,7 +296,6 @@ def get_processed_image_count():
                 counts[feature_type] = 0
         except:
             counts[feature_type] = 0
-    
     return counts
 
 def get_dataset_statistics():
@@ -303,7 +319,6 @@ def get_dataset_statistics():
         stats['convnext_completion'] = 0
         stats['hsv_completion'] = 0
         stats['overall_completion'] = 0
-    
     return stats
 
 
@@ -345,7 +360,6 @@ def resolve_image_path(image_path, search_paths=None):
         # Try current directory as last resort
         if os.path.exists(image_path):
             return os.path.abspath(image_path)
-    
     return None
 
 def find_image_in_database(image_path, search_paths=None):
@@ -375,7 +389,6 @@ def find_image_in_database(image_path, search_paths=None):
             for root, dirs, files in os.walk(search_dir):
                 if filename in files:
                     return os.path.join(root, filename)
-    
     return None
 
 def validate_image_path(image_path):
@@ -401,7 +414,6 @@ def validate_image_path(image_path):
     _, ext = os.path.splitext(image_path.lower())
     if ext not in ALLOWED_IMAGE_EXTENSIONS:
         return False, f"Unsupported image format: {ext}"
-    
     return True, "Valid image path"
 
 # ========== Feutures, FAISS and Clustering MANAGEMENT ==========
@@ -411,7 +423,6 @@ def get_feature_path(feature_name):
         filename = FEATURE_FILES[feature_name]
     else:
         filename = f"{feature_name}_features.pkl"
-    
     return os.path.join(PICKLE_PATH, filename)
 
 def get_feature_config(feature_name):
@@ -506,7 +517,6 @@ def get_clustering_status():
         status['faiss_available'] = True
     except ImportError:
         status['faiss_available'] = False
-    
     return status
 
 def validate_hsv_config():
@@ -528,7 +538,6 @@ def validate_hsv_config():
     ranges = config['ranges']
     if not isinstance(ranges, list) or len(ranges) != 6:
         issues.append("HSV ranges must be a list of 6 values")
-
     return issues
 
 def validate_convnext_config():
@@ -544,5 +553,237 @@ def validate_convnext_config():
     batch_size = config.get('batch_size', 64)
     if batch_size < 32:
         issues.append(f"ConvNeXt batch size too small: {batch_size} (recommended: 32+)")
-    
     return issues
+
+class FeatureCache:
+    """Simple caching system for features and indices."""
+    
+    def __init__(self, cache_dir=None):
+        self.cache_dir = cache_dir or os.path.join(PICKLE_PATH, 'cache')
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.memory_cache = {}
+        self.cache_stats = {'hits': 0, 'misses': 0}
+        self.max_memory_cache_size = PERFORMANCE_CONFIGS['caching']['memory_cache_size']
+    
+    def get_cache_key(self, data_type, identifier, params=None):
+        """Generate cache key from data type, identifier, and parameters."""
+        key_data = f"{data_type}_{identifier}"
+        if params:
+            params_str = json.dumps(params, sort_keys=True)
+            key_data += f"_{params_str}"
+        return hashlib.md5(key_data.encode()).hexdigest()[:16]
+    
+    def get_cached_indices(self, feature_type, cluster_config):
+        """Get cached FAISS indices if available."""
+        if not PERFORMANCE_CONFIGS['caching']['enable_index_cache']:
+            return None
+            
+        cache_key = self.get_cache_key('faiss_indices', feature_type, cluster_config)
+        cache_path = os.path.join(self.cache_dir, f"indices_{cache_key}.pkl")
+        
+        if os.path.exists(cache_path):
+            try:
+                # Check if cache is newer than source features
+                feature_path = get_feature_file_path(feature_type)
+                if (os.path.exists(feature_path) and 
+                    os.path.getmtime(cache_path) > os.path.getmtime(feature_path)):
+                    
+                    with open(cache_path, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    
+                    self.cache_stats['hits'] += 1
+                    logging.info(f"Loaded cached indices for {feature_type}")
+                    return cached_data
+                    
+            except Exception as e:
+                logging.warning(f"Failed to load cached indices: {e}")
+        
+        self.cache_stats['misses'] += 1
+        return None
+    
+    def save_indices_to_cache(self, feature_type, indices_data, cluster_config):
+        """Save FAISS indices to cache."""
+        cache_key = self.get_cache_key('faiss_indices', feature_type, cluster_config)
+        cache_path = os.path.join(self.cache_dir, f"indices_{cache_key}.pkl")
+        try:
+            with open(cache_path, 'wb') as f:
+                pickle.dump(indices_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logging.info(f"Cached indices for {feature_type}")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to cache indices: {e}")
+            return False
+    
+    def get_from_memory_cache(self, key):
+        """Get item from memory cache."""
+        if key in self.memory_cache:
+            self.cache_stats['hits'] += 1
+            return self.memory_cache[key]
+        self.cache_stats['misses'] += 1
+        return None
+    
+    def store_in_memory_cache(self, key, value):
+        """Store item in memory cache with simple LRU."""
+        if len(self.memory_cache) >= self.max_memory_cache_size:
+            # Remove oldest item
+            oldest_key = next(iter(self.memory_cache))
+            del self.memory_cache[oldest_key]
+        self.memory_cache[key] = value
+    
+    def clear_old_cache(self, max_age_days=None):
+        """Clear old cache files."""
+        if max_age_days is None:
+            max_age_days = PERFORMANCE_CONFIGS['caching']['cache_max_age_days']
+        
+        import time
+        cutoff_time = time.time() - (max_age_days * 24 * 60 * 60)
+        cleared_count = 0
+        
+        try:
+            for filename in os.listdir(self.cache_dir):
+                file_path = os.path.join(self.cache_dir, filename)
+                if os.path.isfile(file_path) and os.path.getmtime(file_path) < cutoff_time:
+                    try:
+                        os.remove(file_path)
+                        cleared_count += 1
+                    except Exception:
+                        pass
+        except FileNotFoundError:
+            pass
+        
+        if cleared_count > 0:
+            logging.info(f"Cleared {cleared_count} old cache files")
+
+    @staticmethod
+    def get_memory_usage():
+        """Get current memory usage statistics."""
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        return {
+            'rss_mb': memory_info.rss / 1024 / 1024,
+            'vms_mb': memory_info.vms / 1024 / 1024,
+            'percent': process.memory_percent()
+        }
+
+    @staticmethod
+    def force_garbage_collection():
+        """Force garbage collection and return memory freed."""
+        import gc
+        mem_before = FeatureCache.get_memory_usage()['rss_mb']
+        gc.collect()
+        mem_after = FeatureCache.get_memory_usage()['rss_mb']
+        freed = mem_before - mem_after
+        if freed > 1.0:
+            logging.info(f"Garbage collection freed {freed:.1f} MB")
+        return freed
+
+# Global cache instance
+global_cache = None
+
+def get_global_cache():
+    """Get or create global cache instance."""
+    global global_cache
+    if global_cache is None:
+        global_cache = FeatureCache()
+    return global_cache
+
+# ========== CONSOLIDATED FUNCTIONS ==========
+def resolve_image_path(image_path, search_paths=None, validate=True):
+    """Unified image path resolution with validation."""
+    if search_paths is None:
+        search_paths = [PATH_TO_SSD]
+    
+    # If already absolute and exists
+    if os.path.isabs(image_path) and os.path.exists(image_path):
+        if validate and not is_valid_image_file(image_path):
+            return None
+        return image_path
+    
+    # Search in directories
+    filename = os.path.basename(image_path)
+    for search_dir in search_paths:
+        if os.path.exists(search_dir):
+            # Try direct path
+            full_path = os.path.join(search_dir, image_path)
+            if os.path.exists(full_path):
+                if validate and not is_valid_image_file(full_path):
+                    continue
+                return full_path
+            
+            # Recursive search
+            for root, dirs, files in os.walk(search_dir):
+                if filename in files:
+                    full_path = os.path.join(root, filename)
+                    if validate and not is_valid_image_file(full_path):
+                        continue
+                    return full_path
+    
+    return None
+
+def is_valid_image_file(image_path):
+    """Check if file is a valid image."""
+    if not os.path.isfile(image_path):
+        return False
+    _, ext = os.path.splitext(image_path.lower())
+    return ext in ALLOWED_IMAGE_EXTENSIONS
+
+def get_feature_file_path(feature_type):
+    """Get file path for any feature type."""
+    filename_map = {
+        'convnext': 'convnext_features.pkl',
+        'hsv': 'hsv_features.pkl',
+        'combined': 'combined_features.pkl'
+    }
+    filename = filename_map.get(feature_type, f"{feature_type}_features.pkl")
+    return os.path.join(PICKLE_PATH, filename)
+
+def get_feature_config_unified(feature_type, config_category='general'):
+    """Unified configuration getter."""
+    if config_category == 'clustering':
+        return CLUSTERING_CONFIGS['clustering_per_feature'].get(
+            feature_type, 
+            CLUSTERING_CONFIGS['clustering_per_feature']['convnext']
+        )
+    elif config_category == 'faiss':
+        return FAISS_CONFIGS['index_types_per_feature'].get(
+            feature_type,
+            FAISS_CONFIGS['index_types_per_feature']['convnext']
+        )
+    else:
+        return FEATURE_CONFIGS.get(feature_type, {})
+
+# Legacy function aliases for compatibility
+def find_image_in_database(image_path, search_paths=None):
+    """Legacy alias - use resolve_image_path instead."""
+    return resolve_image_path(image_path, search_paths, validate=True)
+
+def get_cluster_config(feature_type):
+    """Legacy alias - use get_feature_config_unified instead."""
+    return get_feature_config_unified(feature_type, 'clustering')
+
+def get_faiss_config(feature_type):
+    """Legacy alias - use get_feature_config_unified instead."""
+    return get_feature_config_unified(feature_type, 'faiss')
+
+def get_feature_path(feature_name):
+    """Legacy alias - use get_feature_file_path instead."""
+    return get_feature_file_path(feature_name)
+
+def validate_image_path(image_path):
+    """Validate that an image path exists and is a supported image format."""
+    if not image_path:
+        return False, "No path provided"
+    
+    if not os.path.exists(image_path):
+        return False, f"Path does not exist: {image_path}"
+    
+    if not os.path.isfile(image_path):
+        return False, f"Path is not a file: {image_path}"
+    
+    # Check file extension
+    _, ext = os.path.splitext(image_path.lower())
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        return False, f"Unsupported image format: {ext}"
+    return True, "Valid image path"
+

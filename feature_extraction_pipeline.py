@@ -3,14 +3,18 @@ import numpy as np
 import cv2
 from PIL import Image
 import pickle
+import gc
+import torch
 from tqdm import tqdm
 import logging
 
 from config import (PATH_TO_SSD, PICKLE_PATH, CHECKPOINT_PATH, CHECKPOINT_INTERVAL, 
-                   FEATURE_CONFIGS, FEATURE_FILES, get_enabled_features, get_similarity_weights)
+                   FEATURE_CONFIGS, PERFORMANCE_CONFIGS, FEATURE_FILES, get_enabled_features, get_similarity_weights)
 from db_api import (create_connection, insert_image_metadata, update_feature_metadata,
                    save_features_to_pickle, DB_PATH)
 from convnext_extractor import ConvNeXtFeatureExtractor
+
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -45,7 +49,6 @@ class MultiFeatureExtractor:
         """Get default ConvNeXt feature vector on failure."""
         expected_dims = FEATURE_CONFIGS['convnext'].get('embedding_size', 1024)
         random_features = np.random.normal(0, 0.3, expected_dims).astype(np.float32) # Use random features with proper magnitude
-    
         return random_features
     
     def preprocess_image(self, image_path, target_size=(224, 224)):
@@ -89,11 +92,11 @@ class MultiFeatureExtractor:
         }
     
     def extract_hsv_histogram(self, image_rgb):
-        """Extract HSV histogram with FIXED mask handling and better preprocessing."""
+        """Extract HSV histogram with ENHANCED variation and mask handling."""
         try:
             config = FEATURE_CONFIGS['hsv']
             
-            # Optional: slight blur to reduce noise
+            # Slight blur to reduce noise
             if config.get('preprocessing', {}).get('gaussian_blur', False):
                 blur_kernel = config['preprocessing'].get('blur_kernel', (3, 3))
                 image_rgb = cv2.GaussianBlur(image_rgb, blur_kernel, 0)
@@ -101,31 +104,33 @@ class MultiFeatureExtractor:
             # Convert to HSV
             hsv_image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
             
-            # CRITICAL FIX: Create mask for low saturation regions with correct data type
+            #Create mask for low saturation regions
             mask = None
             if config.get('preprocessing', {}).get('mask_low_saturation', False):
-                sat_threshold = config['preprocessing'].get('saturation_threshold', 30)
+                sat_threshold = config['preprocessing'].get('saturation_threshold', 25)
                 # FIX: Convert boolean mask to uint8 for OpenCV compatibility
-                mask_bool = hsv_image[:, :, 1] > sat_threshold
-                mask = mask_bool.astype(np.uint8) * 255  # Convert to 0/255 values
+                mask = np.where(hsv_image[:, :, 1] > sat_threshold, 255, 0).astype(np.uint8)
                 logging.debug(f"Applied saturation mask with threshold {sat_threshold}")
             
             # Calculate histogram with proper ranges
             hist = cv2.calcHist([hsv_image], [0, 1, 2], mask, config['bins'], config['ranges'])
             
-            # Better normalization
+            # Normalize but preserve variation
             hist = hist.flatten().astype(np.float32)
             hist_sum = hist.sum()
-            if hist_sum > 0:
+            
+            if hist_sum > 1e-10:
                 hist = hist / hist_sum
-                # Add small epsilon to avoid zeros in Bhattacharyya calculation
-                hist = hist + 1e-10
-                hist = hist / hist.sum()  # Re-normalize
+                
+                # Only add epsilon if histogram is too sparse
+                if np.sum(hist > 0) < len(hist) * 0.1:  # Less than 10% bins have content
+                    hist = hist + 1e-10
+                    hist = hist / hist.sum()  # Re-normalize
             else:
                 # Fallback uniform distribution
                 hist = np.ones_like(hist) / len(hist)
             
-            # CRITICAL: Validate dimensions
+            #Validate dimensions
             expected_dims = np.prod(config['bins'])
             if len(hist) != expected_dims:
                 logging.warning(f"HSV histogram dimension mismatch: got {len(hist)}, expected {expected_dims}")
@@ -136,7 +141,12 @@ class MultiFeatureExtractor:
                     padded_hist[:len(hist)] = hist
                     hist = padded_hist
             
-            logging.debug(f"HSV histogram: shape={hist.shape}, sum={hist.sum():.6f}")
+            # Final validation
+            if not np.isfinite(hist).all():
+                logging.error("HSV histogram contains non-finite values, using uniform fallback")
+                hist = np.ones(expected_dims, dtype=np.float32) / expected_dims
+            
+            logging.debug(f"HSV histogram: shape={hist.shape}, sum={hist.sum():.6f}, variation={np.std(hist):.6f}")
             return hist
             
         except Exception as e:
@@ -152,7 +162,7 @@ class MultiFeatureExtractor:
                 return self.get_default_convnext_features()
             
             # Extract features using ConvNeXt extractor
-            features = self.convnext_extractor.extract_features(image_rgb, normalize=True)
+            features = self.convnext_extractor.extract_features(image_rgb, normalize=False) #ConvNext normalization is only in convnext:extractor.py
             
             if features is None:
                 logging.warning("ConvNeXt extraction returned None, using default")
@@ -166,14 +176,18 @@ class MultiFeatureExtractor:
             feature_norm = np.linalg.norm(features)
             feature_std = np.std(features)
             logging.debug(f"ConvNeXt extracted - norm: {feature_norm:.4f}, std: {feature_std:.4f}")
+          
+            # Validate feature quality
+            if feature_norm < 1e-6:
+                logging.warning("ConvNeXt features have very low norm, using fallback")
+                return self.get_default_convnext_features()
             
             return features
-            
+    
         except Exception as e:
             logging.error(f"Error extracting ConvNeXt features: {e}")
             return self.get_default_convnext_features()
     
-
     def extract_all_features(self, image_path):
         """Extract all enabled features from an image."""
         processed = self.preprocess_image(image_path)
@@ -185,11 +199,41 @@ class MultiFeatureExtractor:
         
         # Extract features based on enabled features
         if 'hsv' in enabled_features:
-            features['hsv'] = self.extract_hsv_histogram(processed['rgb'])
-        
+            try:
+                features['hsv'] = self.extract_hsv_histogram(processed['rgb'])
+            except Exception as e:
+                logging.error(f"HSV extraction failed for {os.path.basename(image_path)}: {e}")
+                features['hsv'] = None
+    
         if 'convnext' in enabled_features:
-            features['convnext'] = self.extract_convnext_features(processed['rgb'])
+            try:
+                features['convnext'] = self.extract_convnext_features(processed['rgb'])
+            except Exception as e:
+                logging.error(f"ConvNeXt extraction failed for {os.path.basename(image_path)}: {e}")
+                features['convnext'] = None
         
+        has_valid_features = False
+        
+        if features.get('hsv') is not None:
+            expected_hsv_size = np.prod(FEATURE_CONFIGS['hsv']['bins'])
+            if isinstance(features['hsv'], np.ndarray) and len(features['hsv']) == expected_hsv_size:
+                has_valid_features = True
+            else:
+                logging.warning(f"Invalid HSV features for {os.path.basename(image_path)}")
+                features['hsv'] = None
+    
+        if features.get('convnext') is not None:
+            expected_conv_size = FEATURE_CONFIGS['convnext'].get('embedding_size', 1024)
+            if isinstance(features['convnext'], np.ndarray) and len(features['convnext']) == expected_conv_size:
+                has_valid_features = True
+            else:
+                logging.warning(f"Invalid ConvNeXt features for {os.path.basename(image_path)}")
+                features['convnext'] = None
+        
+        if not has_valid_features:
+            logging.error(f"No valid features extracted for {os.path.basename(image_path)}")
+            return None
+    
         # Add metadata
         try:
             features['file_size'] = os.path.getsize(image_path)
@@ -198,7 +242,6 @@ class MultiFeatureExtractor:
             logging.warning(f"Could not get metadata for {image_path}: {e}")
             features['file_size'] = 0
             features['width'], features['height'] = 0, 0
-        
         return features
 
 def get_image_paths(path_to_ssd):
@@ -259,6 +302,16 @@ def process_images_batch(extractor, image_paths, conn, checkpoint_path, batch_si
         logging.info("All images already processed!")
         return all_features
     
+    # Check if this is a large dataset and adjust settings
+    total_images = len(remaining_paths)
+    if total_images > 10000:
+        batch_size = min(batch_size, PERFORMANCE_CONFIGS['feature_extraction']['batch_size_convnext'])
+        checkpoint_freq = 1000
+        logging.info(f"Large dataset detected ({total_images} images)")
+        logging.info(f"Using reduced batch size: {batch_size}")
+    else:
+        checkpoint_freq = CHECKPOINT_INTERVAL
+
     # Track processing statistics
     processed_count = 0
     error_count = 0
@@ -271,7 +324,7 @@ def process_images_batch(extractor, image_paths, conn, checkpoint_path, batch_si
         
         for image_path in tqdm(batch_paths, desc=f"Batch {i//batch_size + 1}", leave=False):
             try:
-                full_image_path = image_path #to preserve the full image path
+                full_image_path = image_path # to preserve the full image path
                 image_filename = os.path.basename(image_path)
                 processed_count += 1
                 
@@ -332,7 +385,6 @@ def process_images_batch(extractor, image_paths, conn, checkpoint_path, batch_si
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
         logging.info("Checkpoint cleaned up")
-    
     return all_features
 
 def store_features_in_database(conn, features):
@@ -399,19 +451,42 @@ def validate_extracted_features(features):
     if 'hsv' in features and features['hsv'] is not None:
         hsv_feat = features['hsv']
         expected_size = np.prod(FEATURE_CONFIGS['hsv']['bins'])
+        
         if len(hsv_feat) != expected_size:
             validation_results['issues'].append(f"HSV size mismatch: {len(hsv_feat)} vs {expected_size}")
+        
         if hsv_feat.dtype != np.float32:
             validation_results['warnings'].append("HSV not float32")
-    
+
+        # Check if histogram is properly normalized
+        hsv_sum = np.sum(hsv_feat)
+        if abs(hsv_sum - 1.0) > 0.01:
+            validation_results['warnings'].append(f"HSV histogram not normalized: sum={hsv_sum:.4f}")
+        
+        # Check for reasonable variation
+        hsv_std = np.std(hsv_feat)
+        if hsv_std < 1e-6:
+            validation_results['warnings'].append("HSV histogram has very low variation")
+
     # Check ConvNeXt features
     if 'convnext' in features and features['convnext'] is not None:
         conv_feat = features['convnext']
         expected_size = FEATURE_CONFIGS['convnext'].get('embedding_size', 1024)
+        
         if len(conv_feat) != expected_size:
             validation_results['issues'].append(f"ConvNeXt size mismatch: {len(conv_feat)} vs {expected_size}")
+        
         if conv_feat.dtype != np.float32:
             validation_results['warnings'].append("ConvNeXt not float32")
+
+        # Check feature quality
+        conv_norm = np.linalg.norm(conv_feat)
+        if conv_norm < 1e-6:
+            validation_results['issues'].append("ConvNeXt features have near-zero norm")
+        
+        conv_std = np.std(conv_feat)
+        if conv_std < 1e-6:
+            validation_results['warnings'].append("ConvNeXt features have very low variation")
     
     validation_results['valid'] = len(validation_results['issues']) == 0
     return validation_results
@@ -439,7 +514,6 @@ def learning_mode(image_directory=None, use_cuda=True, batch_size=50):
     if not image_paths:
         logging.error("No images found to process")
         return False
-    
     logging.info(f"Found {len(image_paths)} images to process")
     
     # Connect to database
@@ -462,8 +536,7 @@ def learning_mode(image_directory=None, use_cuda=True, batch_size=50):
         # Show model information
         if extractor.convnext_extractor:
             info = extractor.convnext_extractor.get_model_info()
-            logging.info(f"ConvNeXt model info: {info['model_name']}, {info['feature_dim']} dims")
-        
+            logging.info(f"ConvNeXt model info: {info['model_name']}, {info['feature_dim']} dims") 
         return True
         
     except Exception as e:

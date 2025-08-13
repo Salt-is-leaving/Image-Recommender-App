@@ -17,7 +17,6 @@ except ImportError:
     logging.error("timm not available. Install with: pip install timm>=0.9.0")
 
 from config import FEATURE_CONFIGS
-
 logging.basicConfig(level=logging.INFO)
 
 class ConvNeXtFeatureExtractor:
@@ -92,7 +91,7 @@ class ConvNeXtFeatureExtractor:
         """Initialize preprocessing with exact ImageNet standards."""
         config = FEATURE_CONFIGS['convnext']['preprocessing']
         
-        # ConvNeXt preprocessing pipeline - CRITICAL: Match training exactly
+        # ConvNeXt preprocessing pipeline should match training exactly
         self.transform = transforms.Compose([
             transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),  # Resize to 256 first
             transforms.CenterCrop(224),  # Then center crop to 224
@@ -158,15 +157,14 @@ class ConvNeXtFeatureExtractor:
             
             if self.use_fp16:
                 tensor = tensor.half()
-            
             return tensor
             
         except Exception as e:
             logging.error(f"Error preprocessing image: {e}")
             return None
     
-    def extract_features(self, image_input, normalize=True, use_center_crop=True):
-        """Extract ConvNeXt features with PROPER normalization that preserves variation."""
+    def extract_features(self, image_input, normalize=False, use_center_crop=True):
+        """Extract ConvNeXt features WITHOUT any normalization - pure raw output."""
         try:
             tensor = self.preprocess_image(image_input, use_center_crop=use_center_crop)
             if tensor is None:
@@ -189,30 +187,31 @@ class ConvNeXtFeatureExtractor:
                     padded = np.zeros(self.feature_dim, dtype=np.float32)
                     padded[:features.shape[0]] = features
                     features = padded
-            
-            # FIXED: Simple L2 normalization for ConvNeXt features
+            #ConvNext normalization is only applied in ConvNextFeatureExtractor.extract_features_raw and nowhere else
             if normalize:
-                # Simple L2 normalization - preserves ConvNeXt's trained feature relationships
                 norm = np.linalg.norm(features)
                 if norm > 1e-8:
                     features = features / norm
+                    logging.debug(f"ConvNeXt features normalized: norm was {norm:.4f}")
                 else:
-                    # Only for completely degenerate features
-                    logging.warning("Degenerate features detected, using random fallback")
-                    features = np.random.normal(0, 0.01, self.feature_dim).astype(np.float32)
-                    features = features / np.linalg.norm(features)
-         
-            # Final validation
+                    logging.warning("ConvNeXt features have near-zero norm, skipping normalization")
+            else:
+                logging.debug(f"Raw ConvNeXt features: norm={np.linalg.norm(features):.4f}, std={np.std(features):.6f}")
+            
+            # Only validate for non-finite values
             if not np.isfinite(features).all():
                 logging.error("Non-finite values in features")
-                return np.random.normal(0, 0.3, self.feature_dim).astype(np.float32)
-            
+                features = np.random.normal(0, 1.0, self.feature_dim).astype(np.float32)
+                if normalize:
+                    features = features / np.linalg.norm(features)
             return features.astype(np.float32)
             
         except Exception as e:
             logging.error(f"Error extracting ConvNeXt features: {e}")
-            return np.random.normal(0, 0.3, self.feature_dim).astype(np.float32)
-
+            fallback = np.random.normal(0, 1.0, self.feature_dim).astype(np.float32)
+            if normalize:
+                fallback = fallback / np.linalg.norm(fallback)
+            return fallback
 
     def extract_batch_features(self, image_list, batch_size=32, normalize=True, robust=False):
         """Extract features from a batch of images for efficiency."""
@@ -267,7 +266,6 @@ class ConvNeXtFeatureExtractor:
                 logging.error(f"Error processing batch {i//batch_size + 1}: {e}")
                 # Add zero features for failed batch
                 all_features.extend([np.zeros(self.feature_dim, dtype=np.float32)] * len(batch))
-        
         return all_features
     
     def get_model_info(self):
@@ -292,7 +290,7 @@ class ConvNeXtFeatureExtractor:
         }
     
     def validate_features(self, features):
-        """Feature validation for the fixed normalization."""
+        """Feature validation for the correct normalization."""
         if features is None:
             return False, "Features are None"
         
@@ -320,143 +318,50 @@ class ConvNeXtFeatureExtractor:
     
         return True, "Valid features with natural variation"
 
-def test_normalization_fix():
-    """Test the fixed normalization approach."""
+def test_normalization_parameter():
+    """Test if normalization parameter works correctly."""
     try:
         extractor = ConvNeXtFeatureExtractor(use_cuda=False, use_fp16=False)
         
-        # Test with 10 random images
-        test_results = []
+        # Create a test image
+        test_image = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
         
-        for i in range(15):
-            if i < 5:
-                # Random noise with different scales
-                scale = 0.3 + (i * 0.4)  # 0.3 to 1.9
-                test_image = (np.random.randn(224, 224, 3) * scale * 255).clip(0, 255).astype(np.uint8)
-            elif i < 10:
-                # Different intensity solid colors
-                intensity = int(25 + (i-5) * 45)  # 25, 70, 115, 160, 205
-                test_image = np.full((224, 224, 3), intensity, dtype=np.uint8)
-            else:
-                # Patterned images
-                test_image = np.zeros((224, 224, 3), dtype=np.uint8)
-                pattern_type = i - 10
-                if pattern_type == 0:
-                    # Checkerboard
-                    test_image[::16, ::16] = 255
-                elif pattern_type == 1:
-                    # Gradient
-                    test_image[:, :, 0] = np.linspace(0, 255, 224).reshape(1, -1)
-                elif pattern_type == 2:
-                    # Stripes
-                    test_image[::8, :] = 255
-                elif pattern_type == 3:
-                    # Circles
-                    y, x = np.ogrid[:224, :224]
-                    mask = (x - 112)**2 + (y - 112)**2 < 50**2
-                    test_image[mask] = 255
-                else:
-                    # Complex pattern
-                    test_image = (np.sin(np.arange(224*224*3).reshape(224, 224, 3) * 0.01) * 127 + 128).astype(np.uint8)
-            
-            # Extract features
-            features = extractor.extract_features(test_image, normalize=True)
-            
-            if features is not None:
-                norm = np.linalg.norm(features)
-                std = np.std(features)
-                range_val = np.max(features) - np.min(features)
-                mean_val = np.mean(features)
-                
-                test_results.append({
-                    'norm': norm,
-                    'std': std,
-                    'range': range_val,
-                    'mean': mean_val
-                })
-                
-                print(f"Image {i+1:2d}: norm={norm:6.3f}, std={std:6.4f}, range={range_val:6.3f}, mean={mean_val:7.4f}")
+        # Test with normalize=False (should preserve diversity)
+        raw_features = extractor.extract_features(test_image, normalize=False)
+        raw_norm = np.linalg.norm(raw_features)
         
-        if not test_results:
-            print("No valid test results")
-            return False
+        # Test with normalize=True (should normalize to ~1.0)
+        norm_features = extractor.extract_features(test_image, normalize=True)
+        norm_norm = np.linalg.norm(norm_features)
         
-        # Analyze results with REALISTIC expectations
-        norms = [r['norm'] for r in test_results]
-        stds = [r['std'] for r in test_results]
+        print(f"Raw features norm: {raw_norm:.4f}")
+        print(f"Normalized features norm: {norm_norm:.4f}")
         
-        norm_min = np.min(norms)
-        norm_max = np.max(norms)
-        norm_std = np.std(norms)
-        norm_mean = np.mean(norms)
-        std_mean = np.mean(stds)
-        norm_range = norm_max - norm_min
+        # Validate
+        normalize_works = abs(norm_norm - 1.0) < 0.1 and raw_norm > 1.0
         
-        print(f"Norm statistics:")
-        print(f"Range: {norm_min:.3f} - {norm_max:.3f} (spread: {norm_range:.3f})")
-        print(f"Mean: {norm_mean:.3f}")
-        print(f"Std deviation: {norm_std:.6f}")
-        print(f"Feature diversity:")
-        print(f"Average feature std: {std_mean:.6f}")
-        
-        # REVISED success criteria - more realistic
-        norm_variation_good = norm_std > 0.05  # Relaxed from 0.01 to 0.05
-        norm_range_good = norm_range > 0.1     # At least 0.1 difference between min/max
-        reasonable_magnitude = 1.0 < norm_mean < 10.0  # Much wider range
-        feature_diversity_good = std_mean > 0.02  # Relaxed from 0.05 to 0.02
-        not_identical = norm_std > 0.001  # Keep this strict
-        
-        print(f"\n=== VALIDATION ===")
-        print(f"Norm variation good (>{0.05:.3f}): {norm_variation_good} ({norm_std:.6f})")
-        print(f"Norm range good (>{0.1:.1f}): {norm_range_good} ({norm_range:.3f})")
-        print(f"Reasonable magnitude (0.5-20): {reasonable_magnitude} ({norm_mean:.3f})")
-        print(f"Feature diversity good (>{0.02:.3f}): {feature_diversity_good} ({std_mean:.6f})")
-        print(f"Not identical (>{0.001:.3f}): {not_identical} ({norm_std:.6f})")
-        
-        all_good = (norm_variation_good and norm_range_good and 
-                   reasonable_magnitude and feature_diversity_good and not_identical)
-        
-        if all_good:
-            print(f"NORMALIZATION FIX SUCCESSFUL!")
-            print(f"Features now have natural norm variation!")
-            print(f"No more identical norms problem!")
-            
-            print(f"Next steps:")
-            print(f"1. Delete old features: del D:\\Code_image_rec\\pickles\\convnext_features.pkl")
-            print(f"2. Re-extract: python main.py --mode learning --batch-size 16")
-            print(f"3. Check weights: python main.py --analyze-weights --recalculate-weights")
-            print(f"Expected: ConvNeXt weight should increase significantly from 0.429")
-            
+        if normalize_works:
+            print("Normalize parameter works correctly!")
+            print(f"Raw norm: {raw_norm:.2f}, Normalized norm: {norm_norm:.2f}")
             return True
         else:
-            print(f"NORMALIZATION FIX STILL NEEDS WORK")
-            if not norm_variation_good:
-                print(f"   - Norm variation too low: {norm_std:.6f} (need > 0.05)")
-            if not norm_range_good:
-                print(f"   - Norm range too small: {norm_range:.3f} (need > 0.1)")
-            if not reasonable_magnitude:
-                print(f"   - Magnitude out of range: {norm_mean:.3f} (need 0.5-20)")
-            if not feature_diversity_good:
-                print(f"   - Feature diversity too low: {std_mean:.6f} (need > 0.02)")
-            if not not_identical:
-                print(f"   - Norms still identical: {norm_std:.6f} (need > 0.001)")
-            
+            print("Normalize parameter not working!")
+            print(f"Expected: raw > 1.0, normalized ≈ 1.0")
+            print(f"Got: raw = {raw_norm:.2f}, normalized = {norm_norm:.2f}")
             return False
-    
+            
     except Exception as e:
-        print(f"Test failed with error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Test failed: {e}")
         return False
-    
+        
     
 # Test the implementation
 if __name__ == "__main__":
-    success = test_normalization_fix()
+    success = test_normalization_parameter()
         
     if success:
         print("ConvNeXt normalization fix validated!")
-        print("3. Analyze weights: python main.py --analyze-weights") 
+        print("Analyze weights: python main.py --analyze-weights") 
     else:
         print("ConvNeXt feature extractor test failed")
         

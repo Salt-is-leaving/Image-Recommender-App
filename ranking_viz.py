@@ -11,7 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity, chi2_kernel
 import tkinter as tk
 from tkinter import filedialog
 
-from config import PATH_TO_SSD, FEATURE_CONFIGS, SIMILARITY_WEIGHTS, resolve_image_path, find_image_in_database, get_similarity_weights
+from config import PATH_TO_SSD, FEATURE_CONFIGS, SIMILARITY_WEIGHTS, resolve_image_path, get_similarity_weights
 from db_api import load_features_from_pickle
 from convnext_extractor import ConvNeXtFeatureExtractor
 
@@ -76,6 +76,11 @@ class RankingVisualizer:
             logging.error(f"Failed to initialize ConvNeXt extractor: {e}")
             self.convnext_extractor = None
 
+    def resolve_image_path(self, image_path):
+        """Find image in database directories."""
+        from config import resolve_image_path
+        return resolve_image_path(image_path)
+
     def extract_features_from_image(self, image_path):
         """Extract all features from a new image."""
         # Resolve the image path
@@ -92,38 +97,51 @@ class RankingVisualizer:
             image = Image.open(resolved_path).convert('RGB')
             image_resized = image.resize((224, 224))
             image_rgb = np.array(image_resized)
-            image_gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
             
             features = {}
             
             # HSV histogram
             hsv_image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
             config = FEATURE_CONFIGS['hsv']
+
+            mask = None
+            if config.get('preprocessing', {}).get('mask_low_saturation', False):
+                sat_threshold = config['preprocessing'].get('saturation_threshold', 25)
+                mask = np.where(hsv_image[:, :, 1] > sat_threshold, 255, 0).astype(np.uint8)
+
             hist = cv2.calcHist([hsv_image], [0, 1, 2], None, config['bins'], config['ranges'])
-            hist = hist.flatten()
-            hist = hist + 1e-10
-            hist = hist / hist.sum()
-            features['hsv'] = hist.astype(np.float32)
+            hist = hist.flatten().astype(np.float32)
             
-            # ConvNext features
-            if self.convnext_extractor is not None:
-                convnext_features = self.convnext_extractor.extract_features(image_rgb, normalize=True)
-                if convnext_features is not None:
-                    features['convnext'] = convnext_features  
-                else:
-                    # Fallback to zero vector
-                    features['convnext'] = np.zeros(1024, dtype=np.float32)  
+            # Proper normalization
+            hist_sum = hist.sum()
+            if hist_sum > 1e-10:
+                hist = hist / hist_sum
+                # Only add epsilon if histogram is too sparse
+                if np.sum(hist > 0) < len(hist) * 0.1:
+                    hist = hist + 1e-10
+                    hist = hist / hist.sum()
             else:
-                logging.warning("ConvNeXt extractor not available, using zero vector")
+                hist = np.ones_like(hist) / len(hist)
+            features['hsv'] = hist
+
+            # ConvNext features
+            convnext_features = self.convnext_extractor.extract_features(image_rgb, normalize=False)
+            if convnext_features is not None:
+                # Apply consistent normalization
+                norm = np.linalg.norm(convnext_features)
+                logging.debug(f"ConvNeXt feature norm: {norm:.4f} (should be 28-33 range)")
+                features['convnext'] = convnext_features.astype(np.float32)
+            else:
+                logging.warning("ConvNeXt extractor returned None, using zero vector")
                 features['convnext'] = np.zeros(1024, dtype=np.float32)
-            
+     
             logging.info("Feature extraction completed")
-            return features
-            
+            return features  
+        
         except Exception as e:
             logging.error(f"Error extracting features: {e}")
             return None
-    
+     
     def compute_bhattacharyya_similarity(self, hist1, hist2):
         """Bhattacharyya coefficient for histogram similarity - consistent with search pipeline."""
         if len(hist1) != len(hist2):
@@ -237,7 +255,7 @@ class RankingVisualizer:
                     break
                 
                 col_idx = j + 1
-                image_path = self.find_image_in_database(image_path)
+                image_path = self.resolve_image_path(image_path)
                 
                 if image_path and os.path.exists(image_path):
                     try:
@@ -326,7 +344,6 @@ class RankingVisualizer:
         
         # Visualize results
         self.visualize_rankings(target_image_path, rankings, top_k=10)
-        
         return True
 
 def run_ranking_visualization(image_path=None, use_cuda=True):
