@@ -3,6 +3,7 @@ import numpy as np
 import pickle
 import logging
 import gc 
+from collections import defaultdict
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler, normalize
 from sklearn.decomposition import PCA
@@ -10,9 +11,26 @@ from sklearn.decomposition import PCA
 from config import PICKLE_PATH, PERFORMANCE_CONFIGS, get_cluster_config, get_global_cache
 from db_api import load_features_from_pickle
 
+# FAISS with error handling
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+    # Test FAISS functionality
+    test_index = faiss.IndexFlatL2(10)
+    FAISS_FUNCTIONAL = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    FAISS_FUNCTIONAL = False
+    faiss = None
+    logging.warning("FAISS not available - using direct computation fallback")
+except Exception as e:
+    FAISS_AVAILABLE = True
+    FAISS_FUNCTIONAL = False
+    logging.warning(f"FAISS available but not functional: {e}")
+
 logging.basicConfig(level=logging.INFO)
 
-class ClusteringPipeline:
+class Clustering:
     """Simple clustering pipeline for multi-feature similarity search."""
     
     def __init__(self):
@@ -22,6 +40,7 @@ class ClusteringPipeline:
         self.scalers = {}
         self.cluster_assignments = {} # image_path -> cluster_id
         self.cluster_centers = {}
+        self.faiss_indices = {}  # feature_type -> {cluster_id: faiss.Index}
         self.cache = get_global_cache()
     
     def load_all_features(self):
@@ -39,6 +58,128 @@ class ClusteringPipeline:
         common_image_paths = list(common_image_paths) if common_image_paths else []
         logging.info(f"Found {len(common_image_paths)} images with all feature types")
         return features_data, common_image_paths
+    
+    def load_features_for_search(self):
+        if not hasattr(self, 'features_data'):
+            self.features_data = {}
+
+        if not self.features_data:  # Only load if not already loaded
+            for feature_type in self.feature_types:
+                features = load_features_from_pickle(feature_type)
+                if features:
+                    self.features_data[feature_type] = features
+                    logging.info(f"Loaded {len(features)} {feature_type} features for search")
+        return True
+    
+    def build_indices(self):
+        """Build FAISS indices per cluster with caching."""
+        if not FAISS_AVAILABLE:
+            return True  # Direct computation fallback
+        
+        for feature_type in self.features_data:
+            if feature_type not in self.cluster_assignments:
+                continue
+
+            # Try to load from cache first (index caching)
+            cluster_config = get_cluster_config(feature_type)
+            cached_indices = self.cache.get_cached_indices(feature_type, cluster_config)
+            
+            if cached_indices is not None:
+                self.faiss_indices[feature_type] = cached_indices
+                logging.info(f"Loaded cached FAISS indices for {feature_type}")
+                continue
+        
+            # Build indices if not cached
+            logging.info(f"Building FAISS indices for {feature_type}...")
+            feature_indices = self.build_faiss_indices(feature_type)
+            
+            if feature_indices:
+                self.faiss_indices[feature_type] = feature_indices
+            
+            # Save to cache
+                self.cache.save_indices_to_cache(feature_type, feature_indices, cluster_config)
+                logging.info(f"Built and cached FAISS indices for {feature_type}")
+        return True
+            
+      
+    def build_faiss_indices(self, feature_type):
+        """Build FAISS indices for a feature type with memory management."""
+        features = self.features_data[feature_type]
+        assignments = self.cluster_assignments[feature_type]
+        
+        # Group features by cluster
+        cluster_groups = defaultdict(list)
+        cluster_image_paths = defaultdict(list)
+        logging.info(f"Grouping features by clusters for {feature_type}...")
+        
+        # Process in chunks for memory efficiency 
+        chunk_size = PERFORMANCE_CONFIGS.get('chunk_size', 1000)
+        assignment_items = list(assignments.items())
+        
+        for chunk_start in range(0, len(assignment_items), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(assignment_items))
+            chunk_items = assignment_items[chunk_start:chunk_end]
+            
+            for image_path, cluster_id in chunk_items:
+                if image_path in features and features[image_path] is not None:
+                    processed_feature = self.preprocess_query_feature(
+                        features[image_path], feature_type
+                    )
+                    if processed_feature is not None:
+                        cluster_groups[cluster_id].append(processed_feature)
+                        cluster_image_paths[cluster_id].append(image_path)
+            
+            # Periodic cleanup
+            if chunk_start > 0 and chunk_start % (chunk_size * 10) == 0:
+                gc.collect()
+        
+        # Build indices with memory management
+        feature_indices = {}
+        total_clusters = len(cluster_groups)
+        
+        for i, (cluster_id, cluster_features) in enumerate(cluster_groups.items()):
+            if len(cluster_features) < 2:
+                continue
+            
+            if i % 10 == 0:
+                logging.info(f"Building index for cluster {i+1}/{total_clusters}")
+            
+            try:
+                feature_matrix = np.array(cluster_features).astype(np.float32)
+                dimension = feature_matrix.shape[1]
+                
+                # Create appropriate index type
+                if feature_type == 'hsv':
+                    index = faiss.IndexFlatL2(dimension)
+                    norms = np.linalg.norm(feature_matrix, axis=1, keepdims=True)
+                    feature_matrix = feature_matrix / (norms + 1e-8)
+                else:
+                    index = faiss.IndexFlatIP(dimension)
+                
+                index.add(feature_matrix)
+                
+                feature_indices[cluster_id] = {
+                    'index': index,
+                    'image_path': cluster_image_paths[cluster_id],
+                    'features': feature_matrix
+                }
+                
+                # Clear large matrices from memory immediately - MEMORY MANAGEMENT
+                del feature_matrix
+                
+                # Periodic garbage collection
+                if i % 20 == 0:
+                    gc.collect()
+                
+            except Exception as e:
+                logging.warning(f"Failed to build index for cluster {cluster_id}: {e}")
+                continue
+        
+        # Final cleanup - MEMORY MANAGEMENT
+        del cluster_groups, cluster_image_paths
+        gc.collect()
+        logging.info(f"Built {len(feature_indices)} FAISS indices for {feature_type}")
+        return feature_indices         
     
     def preprocess_features(self, features_dict, feature_type, image_paths):
         """Preprocess features: standardize, PCA, normalize with PCA logic."""
@@ -64,7 +205,7 @@ class ClusteringPipeline:
             norms = np.linalg.norm(feature_matrix, axis=1)
             logging.info(f"ConvNeXt norms preserved")
             
-            # Check if we now have proper variation in the ORIGINAL magnitudes
+            # Check if we now have proper variation in the original magnitudes
             norm_std = np.std(norms)
             if norm_std > 0.1:
                 logging.info(f"Good norm variation in raw features: std={norm_std:.3f}")
@@ -152,8 +293,7 @@ class ClusteringPipeline:
         return self.apply_preprocessing(feature_matrix, feature_type, config), all_valid_paths
     
     def process_normally(self, features_dict, feature_type, image_paths, config):
-        """Normal processing for smaller datasets."""
-        # This is basically our existing preprocess_features logic
+        # This is basically our existing preprocess_features logic. We also use an additional step for larger datasets.
         feature_list = []
         valid_paths = []
         
@@ -214,6 +354,34 @@ class ClusteringPipeline:
             logging.debug(f"Skipping clustering normalization for ConvNeXt (already L2 normalized)")
         return feature_matrix
     
+    def assign_query_to_clusters(self, preprocessed_features, top_k_clusters=3):
+        """Assign ALREADY PREPROCESSED query features to clusters."""
+        cluster_assignments = {}
+        
+        for feature_type, preprocessed_feature in preprocessed_features.items():
+            if feature_type not in self.cluster_centers:
+                continue
+            
+            # Use preprocessed feature directly - NO additional preprocessing
+            centers = self.cluster_centers[feature_type]
+            distances = np.linalg.norm(centers - preprocessed_feature, axis=1)
+            
+            logging.debug(f"DEBUG {feature_type}: Preprocessed query shape: {preprocessed_feature.shape}")
+            logging.debug(f"DEBUG {feature_type}: Centers shape: {centers.shape}")
+            logging.debug(f"DEBUG {feature_type}: Distance range: [{distances.min():.4f}, {distances.max():.4f}]")
+            
+            nearest_indices = np.argsort(distances)[:top_k_clusters]
+            
+            cluster_candidates = []
+            for idx in nearest_indices:
+                cluster_candidates.append({
+                    'cluster_id': int(idx),
+                    'distance': float(distances[idx])
+                })
+            
+            cluster_assignments[feature_type] = cluster_candidates
+        return cluster_assignments
+
     def cluster_features(self, feature_matrix, feature_type, image_paths):
         """Perform K-means clustering."""
         config = get_cluster_config(feature_type)
@@ -329,39 +497,157 @@ class ClusteringPipeline:
             logging.error(f"Error preprocessing query feature {feature_type}: {e}")
             return None
     
-    def assign_query_to_clusters(self, query_features, top_k_clusters=3):
-        """Assign query to clusters for each feature type."""
-        cluster_assignments = {}
+    def compute_bhattacharyya_similarity(self, hist1, hist2):
+        """Bhattacharyya coefficient for histogram similarity."""
+        try:
+            # Ensure positive values
+            hist1_clean = np.maximum(hist1, 1e-12)
+            hist2_clean = np.maximum(hist2, 1e-12)
+            
+            # Normalize histograms
+            hist1_norm = hist1_clean / (np.sum(hist1_clean) + 1e-10)
+            hist2_norm = hist2_clean / (np.sum(hist2_clean) + 1e-10)
+            
+            # Compute Bhattacharyya coefficient
+            product = hist1_norm * hist2_norm
+            product = np.maximum(product, 0.0)
+            sqrt_product = np.sqrt(product)
+            
+            similarity = np.sum(sqrt_product)
+            return max(0.0, min(1.0, similarity))
+            
+        except Exception as e:
+            logging.error(f"Error in Bhattacharyya computation: {e}")
+            return 0.0
+
+    def multi_feature_search(self, preprocessed_features, weights, top_n=10):
+        """Multi-feature search using preprocessed features and dynamic weights."""
+        from collections import defaultdict
         
-        for feature_type, query_feature in query_features.items():
-            if feature_type not in self.cluster_centers:
+        # Ensure features are loaded for search
+        if not self.features_data:
+            self.load_features_for_search()
+        
+        all_similarities = defaultdict(lambda: {
+            'total_score': 0.0,
+            'count': 0,
+            'details': {},
+            'cluster_info': {}
+        })
+
+        # Search using each available feature type
+        for feature_type, preprocessed_feature in preprocessed_features.items():
+            if feature_type not in weights:
+                logging.warning(f"Feature type {feature_type} not in weights config")
                 continue
-            
-            query_processed = self.preprocess_query_feature(query_feature, feature_type)
-            if query_processed is None:
-                print(f"DEBUG: Query preprocessing failed for {feature_type}")
+        
+            if feature_type not in self.cluster_assignments:
+                logging.warning(f"No clustering data for {feature_type}")
+                continue  
+
+            try:
+                # Get cluster assignments for this feature
+                cluster_assignments = self.assign_query_to_clusters(
+                    {feature_type: preprocessed_feature}, top_k_clusters=3
+                )
+                
+                if feature_type not in cluster_assignments:
+                    continue
+                
+                # Search within assigned clusters
+                results = []
+                for cluster_info in cluster_assignments[feature_type]:
+                    cluster_id = cluster_info['cluster_id']
+                    
+                    # Get all images in this cluster
+                    cluster_images = [
+                        img_path for img_path, assigned_cluster 
+                        in self.cluster_assignments[feature_type].items()
+                        if assigned_cluster == cluster_id
+                    ]
+                    
+                    # Compare with each image in cluster
+                    for image_path in cluster_images:
+                        if feature_type in self.features_data and image_path in self.features_data[feature_type]:
+                            db_feature = self.features_data[feature_type][image_path]
+                            if db_feature is not None:
+                                # Preprocess database feature
+                                db_processed = self.preprocess_query_feature(db_feature, feature_type)
+                                if db_processed is not None:
+                                    # Calculate similarity
+                                    if feature_type == 'hsv':
+                                        # Bhattacharyya coefficient for histograms
+                                        similarity = self.compute_bhattacharyya_similarity(
+                                            preprocessed_feature, db_processed
+                                        )
+                                    else:
+                                        # Cosine similarity for ConvNeXt
+                                        similarity = np.dot(preprocessed_feature, db_processed)
+                                        query_norm = np.linalg.norm(preprocessed_feature)
+                                        db_norm = np.linalg.norm(db_processed)
+                                        if query_norm > 1e-8 and db_norm > 1e-8:
+                                            similarity = similarity / (query_norm * db_norm)
+                                    
+                                    results.append({
+                                        'image_path': image_path,
+                                        'similarity': max(0.0, min(1.0, similarity)),
+                                        'cluster_id': cluster_id
+                                    })
+                
+                # Apply weights and store results
+                weight = weights[feature_type]
+                logging.info(f"{feature_type}: Found {len(results)} candidates, weight={weight:.3f}")
+                
+                for result in results:
+                    image_path = result['image_path']
+                    similarity = result['similarity']
+                    weighted_similarity = similarity * weight
+                    
+                    all_similarities[image_path]['total_score'] += weighted_similarity
+                    all_similarities[image_path]['count'] += 1
+                    all_similarities[image_path]['details'][feature_type] = similarity
+                    all_similarities[image_path]['cluster_info'][feature_type] = result['cluster_id']
+
+            except Exception as e:
+                logging.error(f"Search failed for {feature_type}: {e}")
                 continue
-            
-            centers = self.cluster_centers[feature_type] # Calculate distances to cluster centers
-            distances = np.linalg.norm(centers - query_processed, axis=1)
-            print(f"DEBUG {feature_type}: Query processed shape: {query_processed.shape}")
-            print(f"DEBUG {feature_type}: Centers shape: {centers.shape}")
-            print(f"DEBUG {feature_type}: Distance range: [{distances.min():.4f}, {distances.max():.4f}]")
-            nearest_indices = np.argsort(distances)[:top_k_clusters]
-            
-            cluster_candidates = []
-            for idx in nearest_indices:
-                cluster_candidates.append({
-                    'cluster_id': int(idx),
-                    'distance': float(distances[idx])
-                })
-            
-            cluster_assignments[feature_type] = cluster_candidates
-        return cluster_assignments
-    
+        
+        # Convert to final results
+        multi_feature_results = []
+        single_feature_results = []
+
+        for image_path, data in all_similarities.items():
+            result = {
+                'image_path': image_path,
+                'combined_similarity': data['total_score'],
+                'feature_count': data['count'],
+                'feature_details': data['details'],
+                'cluster_info': data['cluster_info']
+            }
+
+            if data['count'] >= 2:
+                multi_feature_results.append(result)
+            else:
+                single_feature_results.append(result)
+        
+        # Sort and combine
+        multi_feature_results.sort(key=lambda x: x['combined_similarity'], reverse=True)
+        single_feature_results.sort(key=lambda x: x['combined_similarity'], reverse=True)
+
+        # Prioritize multi-feature matches
+        final_results = multi_feature_results[:top_n]
+        remaining_slots = top_n - len(final_results)
+        if remaining_slots > 0:
+            final_results.extend(single_feature_results[:remaining_slots])
+        
+        logging.info(f"Multi-feature search: {len(multi_feature_results)} multi-feature + "
+                    f"{len(single_feature_results)} single-feature results")
+        
+        return final_results[:top_n]
+      
     def run_clustering_pipeline(self):
-        """Optimized clustering pipeline with chunked processing."""
-        logging.info("Starting optimized clustering pipeline...")
+        # Clustering pipeline with chunked processing
+        logging.info("Starting clustering pipeline...")
         
         # Clear old cache
         self.cache.clear_old_cache()
@@ -394,12 +680,12 @@ class ClusteringPipeline:
         # Save results
         success = self.save_clustering_data()
         if success:
-            logging.info("Optimized clustering pipeline completed successfully")
+            logging.info("Clustering pipeline completed successfully")
         return success
 
 def run_clustering():
     """Main function to run clustering."""
-    pipeline = ClusteringPipeline()
+    pipeline = Clustering()
     return pipeline.run_clustering_pipeline()
 
 if __name__ == "__main__":

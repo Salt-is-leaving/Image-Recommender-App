@@ -5,7 +5,6 @@ import time
 import argparse
 from pathlib import Path
 
-
 # Add current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -14,10 +13,10 @@ from config import (PATH_TO_SSD, PICKLE_PATH, DB_PATH, FEATURE_FILES,
                     get_global_cache, get_clustering_status)
 from db_api import create_connection, create_tables, get_feature_completeness
 from feature_extraction_pipeline import learning_mode
-from clustering import run_clustering  
-from similarity_search_pipeline import comparison_mode
+from clustering import run_clustering
 from interactive_pipeline import run_interactive_mode
-from ranking_viz import run_ranking_visualization
+from feature_visualization import run_feature_visualization
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -285,7 +284,6 @@ def run_clustering_mode(args):
                     pass
                 
                 logging.info(" You can now use similarity search:")
-                logging.info("- python main.py --mode comparison")
                 logging.info("- python main.py --mode interactive")
             
             return True
@@ -299,40 +297,6 @@ def run_clustering_mode(args):
         traceback.print_exc()
         return False
 
-def run_comparison_mode(args):
-    """Run similarity comparison mode."""
-    logging.info("=== STARTING COMPARISON MODE ===")
-    
-    # Check clustering availability
-    cluster_status = get_clustering_status()
-    if cluster_status['clustering_available']:
-        logging.info("Using clustering-first search")
-        use_clustering = True
-    else:
-        logging.warning("Clustering not available, using basic search")
-        logging.info("For better performance, run: python main.py --mode clustering")
-        use_clustering = False
-    
-    try:
-        success = comparison_mode(
-            target_image_path=args.target_image,
-            use_gpu=args.cuda and not args.no_gpu,
-            compare_all_methods=True,
-            enable_clustering=use_clustering
-        )
-        
-        if success:
-            logging.info("Comparison mode completed successfully!")
-            return True
-        else:
-            logging.error("Comparison mode failed!")
-            return False
-            
-    except Exception as e:
-        logging.error(f"Comparison mode error: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
 def run_interactive_mode_wrapper(args):
     """Run interactive similarity search mode."""
@@ -365,35 +329,23 @@ def run_interactive_mode_wrapper(args):
         traceback.print_exc()
         return False
 
-def run_vis_mode_wrapper(args):
-    """Run ranking visualization mode."""
-    logging.info("=== STARTING RANKING VISUALIZATION MODE ===")
-    
-    # Check if features are available
-    cluster_status = get_clustering_status()
-    if not cluster_status['clustering_available']:
-        logging.warning("Clustering not available - results may be limited")
-        logging.info("For best results, run: python main.py --mode clustering")
+def run_visualization_mode(args):
+    """Run feature space visualization."""
+    logging.info("=== STARTING FEATURE VISUALIZATION ===")
     
     try:
-        success = run_ranking_visualization(
-            image_path=args.image_path,
-            use_cuda=args.cuda and not args.no_gpu
-        )
+        success = run_feature_visualization(max_samples=2000)
         
         if success:
-            logging.info("Ranking visualization completed successfully!")
+            logging.info("Feature visualization completed!")
             return True
         else:
-            logging.error("Ranking visualization failed!")
+            logging.error("Feature visualization failed!")
             return False
-            
     except Exception as e:
-        logging.error(f"Ranking visualization error: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.error(f"Visualization error: {e}")
         return False
-
+    
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -406,21 +358,12 @@ def parse_arguments():
   # Create clusters for a quicker similarity search. Requires features from learning mode.
   python main.py --mode clustering
   
-  # Compare database images (with pre-computed clusters)
-  python main.py --mode comparison --target-image "image.jpg"
-  
   # Interactive mode - GUI to select any random image for similarity search
   python main.py --mode interactive
   
   # Interactive mode - specific image
   python main.py --mode interactive --image-path "path/to/image.jpg"
   
-# Ranking visualization - compare individual vs integrated feature rankings
-  python main.py --mode vis
-  
-  # Ranking visualization - specific image
-  python main.py --mode vis --image-path "image.jpg"
-
   # Check system status and clustering availability
   python main.py --status
         """
@@ -428,7 +371,7 @@ def parse_arguments():
     
     parser.add_argument(
         '--mode', 
-        choices=['learning', 'comparison', 'interactive', 'clustering', 'vis', 'weights'],
+        choices=['learning', 'interactive', 'clustering', 'weights', 'vis'],
         help='Operation mode to run'
     )
     
@@ -447,7 +390,7 @@ def parse_arguments():
     parser.add_argument(
         '--target-image',
         type=str,
-        help='Target image ID for comparison mode'
+        help='Target image ID for interactive mode'
     )
     
     parser.add_argument(
@@ -521,18 +464,14 @@ def main():
     elif args.mode == 'clustering':
         success &= run_clustering_mode(args)
     
-    # Comparison phase
-    elif args.mode == 'comparison':
-        success &= run_comparison_mode(args)
-    
     # Interactive phase
     elif args.mode == 'interactive':
         success &= run_interactive_mode_wrapper(args)
 
-    # Visualisation phase
+    # Feture space visualization for feature analysis
     elif args.mode == 'vis':
-        success &= run_vis_mode_wrapper(args)
-    
+        success &= run_visualization_mode(args)
+
     # Final status and guidance
     if success:
         logging.info("=== ALL OPERATIONS COMPLETED SUCCESSFULLY ===")
@@ -541,21 +480,14 @@ def main():
         if args.mode == 'clustering':
             logging.info("Clustering completed successfully!")
             logging.info("Now you can use similarity search:")
-            logging.info("python main.py --mode comparison")
             logging.info("python main.py --mode interactive")
                       
         elif args.mode == 'learning':
             logging.info("Feature extraction completed!")
 
-            
         elif args.mode == 'interactive':
             logging.info("Interactive similarity search completed!")
             
-        elif args.mode == 'comparison':
-            logging.info("Comparison mode completed!")
-
-        elif args.mode == 'vis':
-            logging.info("Ranking visualization completed!")
         return 0
     else:
         logging.error("=== SOME OPERATIONS FAILED ===")

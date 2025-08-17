@@ -12,18 +12,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from config import PATH_TO_SSD, PICKLE_PATH, FEATURE_CONFIGS, resolve_image_path, get_similarity_weights
 from db_api import load_features_from_pickle
-from similarity_search_pipeline import ClusteringFirstSearch
 from convnext_extractor import ConvNeXtFeatureExtractor
-
-# ONLY import clustering modules when actually needed
-try:
-    from similarity_search_pipeline import ClusteringFirstSearch
-    from clustering import ClusteringPipeline
-    CLUSTERING_AVAILABLE = True
-except ImportError:
-    CLUSTERING_AVAILABLE = False
-    logging.warning("Clustering modules not available")
-
+from clustering import Clustering
 
 logging.basicConfig(level=logging.INFO)
 
@@ -31,12 +21,7 @@ class InteractiveSimilaritySearch:
     """Interactive similarity search with embedding storage."""
     
     def __init__(self, use_cuda=True):
-        self.searcher = ClusteringFirstSearch(use_gpu=False)
         self.device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
-        
-        # Check if clustering is available before initializing
-        if not CLUSTERING_AVAILABLE:
-            raise ImportError("Clustering modules not available. Run clustering mode first.")
         
         # Check if clustering data exists
         cluster_file = os.path.join(PICKLE_PATH, 'cluster_data.pkl')
@@ -53,13 +38,18 @@ class InteractiveSimilaritySearch:
         
         # Initialize models
         self.convnext_model = None
-        self.clustering = ClusteringPipeline()
+        self.clustering = Clustering()
         
         # Load clustering data
         if not self.clustering.load_clustering_data():
-            logging.warning("No clustering data - run clustering mode first")
+            raise RuntimeError("Failed to load clustering data")
         
-        # Embedding storage for new images
+        # Initialize features_data attribute in clustering
+        self.clustering.features_data = {}
+        if not self.clustering.load_features_for_search():
+            logging.warning("Failed to load features for search")
+        
+        # Embedding storage for new images for which we dont have embeddings yet
         self.embedding_cache_path = os.path.join(PICKLE_PATH, 'new_image_embeddings.pkl')
         self.embedding_cache = self.load_embedding_cache()
         
@@ -72,13 +62,31 @@ class InteractiveSimilaritySearch:
                 use_cuda=(self.device.type == 'cuda'),
                 use_fp16=False
             )
+
+            # DEBUG Test extraction to verify normalization behavior
+            logging.info("Testing ConvNeXt extractor normalization...")
+            test_image = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+            test_features = self.convnext_model.extract_features(test_image, normalize=False)
+            
+            if test_features is not None:
+                test_norm = np.linalg.norm(test_features)
+                logging.info(f"ConvNeXt test extraction: norm={test_norm:.4f}")
+                
+                if test_norm < 2.0:
+                    logging.error("ConvNeXt extractor is normalizing features internally!")
+                    logging.error("This will cause mismatch with database features")
+                elif test_norm > 50.0:
+                    logging.warning(f"ConvNeXt features have unusually high norm: {test_norm:.4f}")
+                else:
+                    logging.info("ConvNeXt extractor normalization looks correct")
+
             logging.info(f"ConvNeXt model loaded on {self.device}")
         except Exception as e:
             logging.error(f"Failed to initialize ConvNeXt model: {e}")
             self.convnext_model = None
     
     def load_embedding_cache(self):
-        """Load cached embeddings for new images."""
+        # Load cached embeddings for new images 
         if os.path.exists(self.embedding_cache_path):
             try:
                 with open(self.embedding_cache_path, 'rb') as f:
@@ -99,32 +107,35 @@ class InteractiveSimilaritySearch:
     def load_database_features(self):
         """Load database features."""
         logging.info("Loading database features...")
-        success = self.searcher.load_and_process_features()
+        success = self.clustering.load_features_for_search()
         
         if success:
-            self.indices = self.searcher.faiss_indices
             logging.info("Database features loaded")
-            
-            for ft, assignments in self.searcher.clustering.cluster_assignments.items():
+            for ft, assignments in self.clustering.cluster_assignments.items():
                 n_clusters = len(set(assignments.values()))
                 logging.info(f" {ft}: {len(assignments)} images in {n_clusters} clusters")
-        
         return success
 
     def resolve_image_path(self, image_path):
         """Find image in database directories."""
-        from config import resolve_image_path
         return resolve_image_path(image_path)
-
+    
+    
     def build_search_indices(self):
-        """Build search indices."""
         logging.info("Building search indices...")
-        success = self.searcher.build_indices()
+    
+        # Build FAISS indices if available
+        success = self.clustering.build_indices()
         
         if success:
-            logging.info("Search indices built")
+            if hasattr(self.clustering, 'faiss_indices') and self.clustering.faiss_indices:
+                total_indices = sum(len(indices) for indices in self.clustering.faiss_indices.values())
+                logging.info(f"FAISS indices built: {total_indices} cluster indices")
+            else:
+                logging.info("Direct computation ready (FAISS not available)")
         return success
-    
+        
+
     def extract_features_from_image(self, image_path):
         """Extract features from image with caching."""
         resolved_path = resolve_image_path(image_path)
@@ -149,11 +160,11 @@ class InteractiveSimilaritySearch:
             
             features = {}
             
-            # HSV histogram - FIXED VERSION WITH PROPER MASKING
+            # HSV histogram extraction, proper masking, raw features before clustering
             hsv_image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
             config = FEATURE_CONFIGS['hsv']
             
-            # Create proper mask for low saturation regions - CRITICAL FIX
+            # Create a mask for low saturation regions
             mask = None
             if config.get('preprocessing', {}).get('mask_low_saturation', False):
                 sat_threshold = config['preprocessing'].get('saturation_threshold', 25)
@@ -176,16 +187,16 @@ class InteractiveSimilaritySearch:
                     hist = hist / hist.sum()
             else:
                 hist = np.ones_like(hist) / len(hist)
-            
+            # Store raw HSV features (before clustering preprocessing)
             features['hsv'] = hist
             
-            # ConvNext features - CRITICAL: Keep RAW features to match database
+            # Keep raw ConvNext features to match DB
             if self.convnext_model is not None:
                 convnext_features = self.convnext_model.extract_features(image_rgb, normalize=False)
                 if convnext_features is not None:
                     # Log the norm to verify it matches database range (28-33)
                     norm = np.linalg.norm(convnext_features)
-                    logging.debug(f"ConvNeXt query norm: {norm:.4f} (should be 28-33 range)")
+                    logging.debug(f"ConvNeXt raw query norm: {norm:.4f} (should be 28-33 range)")
                     features['convnext'] = convnext_features.astype(np.float32)  # Keep raw, NO normalization
                 else:
                     logging.warning("ConvNeXt model returned None, using zero vector")
@@ -205,262 +216,178 @@ class InteractiveSimilaritySearch:
             logging.error(f"Error extracting features: {e}")
             return None
     
-    def find_similar_images_for_new_image(self, target_features, top_n=5, target_image_path=None):
-        """Find similar images using clustering-first search."""
+    def find_similar_images_for_new_image(self, target_features, top_n=8, target_image_path=None):
+        # Find similar images using clustering-first search
         logging.info("Starting clustering-first search...")
         
+        # Apply preprocessing once here, then pass to Searcher, otherwise the loop tries to reduce dim again
+        processed_features = {}
+
         # Debug target features
-        for feature_type, feature in target_features.items():
-            feat_norm = np.linalg.norm(feature)
-            feat_shape = feature.shape
-            logging.info(f"Target {feature_type}: shape={feat_shape}, norm={feat_norm:.4f}")
+        for feature_type, raw_feature in target_features.items():
+            if feature_type not in self.clustering.cluster_assignments:
+                logging.warning(f"No clustering data for {feature_type}")
+                continue
+            
+            # Apply the SAME preprocessing as used in Clustering: for HSV - Standardization → PCA (288→48) → L1 normalization
+            # for ConvNeXt - Skip standardization → PCA (1024→128) → No normalization
+            processed_feature = self.clustering.preprocess_query_feature(raw_feature, feature_type)
+            if processed_feature is not None:
+                processed_features[feature_type] = processed_feature
+                logging.info(f"Processed {feature_type}: {raw_feature.shape} → {processed_feature.shape}")
+            else:
+                logging.error(f"Failed to preprocess {feature_type} features")
+        
+        if not processed_features:
+            logging.error("No valid processed features for search")
+            return []
         
         try:
-            # Use the existing multi_feature_search method (without target_image_path parameter)
-            results = self.searcher.multi_feature_search(target_features, top_n=top_n)
+            # Use clustering's multi-feature search directly
+            results = self.clustering.multi_feature_search(
+                processed_features, 
+                self.weights, 
+                top_n=top_n *2 # Get more results to filter
+            )
             
-            if results and len(results) > 0:
-                logging.info(f"Clustering search found {len(results)} results")
-                # Log first few results for debugging
+            # Filter out target image if it's a DB comparison
+            if target_image_path:
+                target_basename = os.path.basename(target_image_path)
+                results = [
+                    r for r in results 
+                    if os.path.basename(r['image_path']) != target_basename
+                ]
+            
+             # Limit to requested number
+            results = results[:top_n]
+
+            if results:
+                logging.info(f"Found {len(results)} similar images")
                 for i, result in enumerate(results[:3]):
                     logging.info(f"  {i+1}. {os.path.basename(result['image_path'])}: {result['combined_similarity']:.4f}")
                 return results
             else:
-                logging.warning("Clustering search returned empty results, trying fallback...")
-                return self.fallback_search(target_features, top_n)
-                
+                logging.warning("No similar images found")
+                return []
+            
         except Exception as e:
-            logging.error(f"Clustering search failed: {e}")
+            logging.error(f"Search failed: {e}")
             import traceback
             traceback.print_exc()
-            return self.fallback_search(target_features, top_n)
-    
-    def fallback_search(self, target_features, top_n=5):
-        """Improved fallback search using raw feature data with proper similarity computation."""
-        logging.info("Using fallback search...")
+            return []
+                
+    def get_individual_rankings(self, target_features, top_k=8):
+        """Get individual rankings for each feature type using clustering pipeline."""
+        individual_rankings = {}
         
-        all_similarities = {}
-        
-        # Use the raw feature data from the searcher
+        # Process raw features to get preprocessed versions first 
+        processed_features = {}
         for feature_type, target_feature in target_features.items():
-            if feature_type not in self.searcher.features_data:
-                logging.warning(f"No feature data for {feature_type}")
+            if feature_type not in self.clustering.cluster_assignments:
+                logging.warning(f"No clustering data for {feature_type}")
+                continue
+                
+            # Apply clustering preprocessing once
+            processed_feature = self.clustering.preprocess_query_feature(target_feature, feature_type)
+            if processed_feature is None:
+                logging.warning(f"Failed to preprocess {feature_type} for individual ranking")
                 continue
             
-            feature_data = self.searcher.features_data[feature_type]
-            logging.info(f"Fallback search using {len(feature_data)} {feature_type} features")
-            
-            # Debug target feature
-            target_flat = target_feature.flatten().astype(np.float32)
-            target_norm_value = np.linalg.norm(target_flat)
-            logging.info(f"Target {feature_type} feature: shape={target_flat.shape}, norm={target_norm_value:.4f}")
-            
-            if target_norm_value < 1e-8:
-                logging.warning(f"Target {feature_type} feature has near-zero norm, skipping")
-                continue
-            
-            similarities = []
-            image_paths = []
-            
-            for image_path, db_feature in feature_data.items():
-                if db_feature is not None:
-                    try:
-                        db_flat = db_feature.flatten().astype(np.float32)
-                        
-                        # Check feature dimensions match
-                        if len(db_flat) != len(target_flat):
-                            logging.warning(f"Feature dimension mismatch: target={len(target_flat)}, db={len(db_flat)}")
-                            continue
-                        
-                        if feature_type == 'hsv':
-                            # For HSV: Use Bhattacharyya coefficient (both should be normalized histograms)
-                            target_hist = np.maximum(target_flat, 1e-10)
-                            db_hist = np.maximum(db_flat, 1e-10)
-                            
-                            target_hist = target_hist / np.sum(target_hist)
-                            db_hist = db_hist / np.sum(db_hist)
-                            
-                            similarity = np.sum(np.sqrt(target_hist * db_hist))
-                            
-                        else:  # ConvNeXt - CRITICAL FIX
-                            # For ConvNeXt: Use dot product of RAW features (both have same scale)
-                            # Since both query and database features are raw (norm ~31), 
-                            # we can use direct dot product
-                            similarity = np.dot(target_flat, db_flat)
-                            
-                            # Normalize by the product of norms for cosine similarity
-                            target_norm = np.linalg.norm(target_flat)
-                            db_norm = np.linalg.norm(db_flat)
-                            
-                            if target_norm > 1e-8 and db_norm > 1e-8:
-                                similarity = similarity / (target_norm * db_norm)
-                            else:
-                                similarity = 0.0
-                            
-                            # Ensure similarity is in valid range
-                            similarity = max(-1.0, min(1.0, similarity))
-                        
-                        similarities.append(similarity)
-                        image_paths.append(image_path)
-                        
-                    except Exception as e:
-                        logging.debug(f"Error computing similarity for {image_path}: {e}")
-                        continue
-            
-            if not similarities:
-                logging.warning(f"No valid similarities computed for {feature_type}")
-                continue
-            
-            # Log similarity statistics
-            similarities = np.array(similarities)
-            logging.info(f"{feature_type} similarities: min={np.min(similarities):.4f}, max={np.max(similarities):.4f}, mean={np.mean(similarities):.4f}")
-            
-            # Get top results for this feature type
-            top_indices = np.argsort(similarities)[::-1][:top_n * 3]  # Get more candidates
-            
-            weight = self.weights.get(feature_type, 0.5)
-            logging.info(f"Using weight {weight} for {feature_type}")
-            
-            for idx in top_indices:
-                if idx < len(image_paths):
-                    image_path = image_paths[idx]
-                    similarity = float(similarities[idx])
+            processed_features[feature_type] = processed_feature
+
+        # Now use the preprocessed features for individual searches (separate, not nested loop)
+        for feature_type, processed_feature in processed_features.items():
+            logging.info(f"Computing individual {feature_type} rankings using clustering search")
+        
+            try:
+                 # Use clustering search directly - search within clusters for single feature
+                cluster_assignments = self.clustering.assign_query_to_clusters(
+                    {feature_type: processed_feature}, top_k_clusters=3
+                )
+                
+                if feature_type not in cluster_assignments:
+                    individual_rankings[feature_type] = []
+                    continue
+                
+                results = []
+                
+                # Search within assigned clusters
+                for cluster_info in cluster_assignments[feature_type]:
+                    cluster_id = cluster_info['cluster_id']
                     
-                    if image_path not in all_similarities:
-                        all_similarities[image_path] = {'total_score': 0.0, 'count': 0, 'details': {}}
+                    # Get all images in this cluster
+                    cluster_images = [
+                        img_path for img_path, assigned_cluster 
+                        in self.clustering.cluster_assignments[feature_type].items()
+                        if assigned_cluster == cluster_id
+                    ]
                     
-                    all_similarities[image_path]['total_score'] += similarity * weight
-                    all_similarities[image_path]['count'] += 1
-                    all_similarities[image_path]['details'][feature_type] = similarity
-        
-        # Convert to list and sort
-        results = []
-        for image_path, data in all_similarities.items():
-            if data['count'] >= 1:
-                results.append({
-                    'image_path': image_path,
-                    'combined_similarity': data['total_score'],
-                    'feature_count': data['count'],
-                    'feature_details': data['details']
-                })
-        
-        results.sort(key=lambda x: x['combined_similarity'], reverse=True)
-        final_results = results[:top_n]
-        
-        if final_results:
-            logging.info(f"Fallback search found {len(final_results)} results")
-            # Log top results for debugging
-            for i, result in enumerate(final_results[:3]):
-                logging.info(f"  {i+1}. {os.path.basename(result['image_path'])}: {result['combined_similarity']:.4f} (details: {result['feature_details']})")
-        else:
-            logging.warning("Fallback search found no results")
-        return final_results
+                    # Compare with each image in cluster
+                    for image_path in cluster_images:
+                        if image_path in self.clustering.features_data[feature_type]:
+                            db_feature = self.clustering.features_data[feature_type][image_path]
+                            if db_feature is not None:
+                                # Preprocess database feature
+                                db_processed = self.clustering.preprocess_query_feature(db_feature, feature_type)
+                                if db_processed is not None:
+                                    # Calculate similarity
+                                    if feature_type == 'hsv':
+                                        similarity = self.clustering.compute_bhattacharyya_similarity(
+                                            processed_feature, db_processed
+                                        )
+                                    else:
+                                        # Cosine similarity for ConvNeXt
+                                        similarity = np.dot(processed_feature, db_processed)
+                                        query_norm = np.linalg.norm(processed_feature)
+                                        db_norm = np.linalg.norm(db_processed)
+                                        if query_norm > 1e-8 and db_norm > 1e-8:
+                                            similarity = similarity / (query_norm * db_norm)
+                                    
+                                    results.append({
+                                        'image_path': image_path,
+                                        'similarity': max(0.0, min(1.0, similarity)),
+                                        'cluster_id': cluster_id
+                                    })
+                
+                # Sort and convert to individual ranking format
+                results.sort(key=lambda x: x['similarity'], reverse=True)
+                rankings = []
+                for result in results[:top_k]:
+                    rankings.append({
+                        'image_path': result['image_path'],
+                        'similarity': result['similarity']
+                    })
+            
+                individual_rankings[feature_type] = rankings
+                
+                if rankings:
+                    logging.info(f"{feature_type} rankings: top similarity = {rankings[0]['similarity']:.4f}")
+                else:
+                    logging.warning(f"No valid {feature_type} rankings computed")
+                
+            except Exception as e:
+                logging.error(f"Error getting {feature_type} rankings: {e}")
+                individual_rankings[feature_type] = []
+        return individual_rankings
     
-    def debug_hsv_pipeline(self, target_features):
-        """Debug HSV processing pipeline."""
-        print("=== HSV PIPELINE DEBUG ===")
-        
-        # Check target features
-        if 'hsv' in target_features:
-            hsv_feat = target_features['hsv']
-            print(f"HSV query: shape={hsv_feat.shape}, sum={hsv_feat.sum():.6f}, norm={np.linalg.norm(hsv_feat):.6f}")
-        
-        # Check cluster assignments
-        assignments = self.searcher.clustering.assign_query_to_clusters(target_features, top_k_clusters=5)
-        if 'hsv' in assignments:
-            print(f"HSV clusters found: {len(assignments['hsv'])}")
-            for cluster in assignments['hsv'][:3]:
-                print(f"  Cluster {cluster['cluster_id']}: distance={cluster['distance']:.4f}")
-        else:
-            print("ERROR: No HSV cluster assignments!")
-        
-        # Check FAISS indices
-        if 'hsv' in self.searcher.faiss_indices:
-            hsv_indices = self.searcher.faiss_indices['hsv']
-            print(f"HSV FAISS indices: {len(hsv_indices)} clusters")
-        else:
-            print("ERROR: No HSV FAISS indices!")
-            
     def print_individual_rankings(self, target_features, integrated_results, target_image_path=None):
         """Print individual feature rankings alongside integrated results."""
         print(f"\n{'='*70}")
         print("INDIVIDUAL vs INTEGRATED FEATURE RANKINGS")
         print(f"{'='*70}")
-        
-    def get_individual_rankings(self, target_features, top_k=8):
-        """Get individual rankings for each feature type."""
-        individual_rankings = {}
-        
-        for feature_type, target_feature in target_features.items():
-            if feature_type not in self.searcher.features_data:
-                logging.warning(f"No feature data for {feature_type}")
-                continue
-            
-            feature_data = self.searcher.features_data[feature_type]
-            logging.info(f"Computing individual {feature_type} rankings from {len(feature_data)} features")
-            
-            similarities = []
-            image_paths = []
-            
-            target_flat = target_feature.flatten().astype(np.float32)
-            
-            for image_path, db_feature in feature_data.items():
-                if db_feature is not None:
-                    try:
-                        db_flat = db_feature.flatten().astype(np.float32)
-                        
-                        if len(db_flat) != len(target_flat):
-                            continue
-                        
-                        if feature_type == 'hsv':
-                            # Bhattacharyya coefficient for HSV
-                            target_hist = np.maximum(target_flat, 1e-10)
-                            db_hist = np.maximum(db_flat, 1e-10)
-                            
-                            target_hist = target_hist / np.sum(target_hist)
-                            db_hist = db_hist / np.sum(db_hist)
-                            
-                            similarity = np.sum(np.sqrt(target_hist * db_hist))
-                        else:
-                            # Cosine similarity for ConvNeXt
-                            target_norm = target_flat / (np.linalg.norm(target_flat) + 1e-8)
-                            db_norm = db_flat / (np.linalg.norm(db_flat) + 1e-8)
-                            
-                            similarity = np.dot(target_norm, db_norm)
-                            similarity = max(-1.0, min(1.0, similarity))
-                        
-                        similarities.append(similarity)
-                        image_paths.append(image_path)
-                        
-                    except Exception as e:
-                        continue
-            
-            if similarities:
-                # Sort by similarity and create ranking
-                similarities = np.array(similarities)
-                top_indices = np.argsort(similarities)[::-1][:top_k]
-                
-                rankings = []
-                for idx in top_indices:
-                    rankings.append({
-                        'image_path': image_paths[idx],
-                        'similarity': float(similarities[idx])
-                    })
-                
-                individual_rankings[feature_type] = rankings
-                logging.info(f"{feature_type} rankings: top similarity = {rankings[0]['similarity']:.4f}")
-            else:
-                individual_rankings[feature_type] = []
-                logging.warning(f"No valid {feature_type} rankings computed")
-        
-        return individual_rankings
+
+        # Get individual rankings for each feature type
+        individual_rankings = self.get_individual_rankings(target_features, top_k=8)
         
         # Print individual rankings
         for feature_type, rankings in individual_rankings.items():
             print(f"\n{feature_type.upper()} ONLY Rankings:")
             print("-" * 40)
-            for i, result in enumerate(rankings[:5]):
-                print(f"  {i+1}. {os.path.basename(result['image_path']):<25} | {result['similarity']:.4f}")
+            if rankings:
+                for i, result in enumerate(rankings[:5]):
+                    print(f"  {i+1}. {os.path.basename(result['image_path']):<25} | {result['similarity']:.4f}")
+            else:
+                print("No rankings available")
         
         # Print integrated rankings
         print(f"\nINTEGRATED Rankings:")
@@ -472,7 +399,7 @@ class InteractiveSimilaritySearch:
                 detail_str = " | ".join([f"{k}:{v:.3f}" for k, v in details.items()])
                 print(f"      ({detail_str})")
         
-        # Quick overlap analysis
+        # HSV-specific analysis
         if 'hsv' in individual_rankings and individual_rankings['hsv']:
             hsv_ids = {os.path.basename(r['image_path']) for r in individual_rankings['hsv'][:5]}
             integrated_ids = {os.path.basename(r['image_path']) for r in integrated_results[:5]}
@@ -482,49 +409,160 @@ class InteractiveSimilaritySearch:
             print(f"\nHSV Analysis:")
             print(f"  Score range: {min(hsv_scores):.3f} - {max(hsv_scores):.3f}")
             print(f"  Overlap with integrated: {overlap}/5 images")
+            
+            # Check for low HSV scores indicating conversion issue
+            if max(hsv_scores) < 0.5:
+                print(f"  WARNING: HSV scores seem low - check score conversion")
+            else:
+                print(f"  HSV scores look healthy")
+            
+            # DEBUG Advanced Multi-Feature Analysis
+        if 'hsv' in individual_rankings and 'convnext' in individual_rankings:
+            hsv_results = individual_rankings['hsv']
+            convnext_results = individual_rankings['convnext']
+            
+            # Find potential multi-feature candidates
+            hsv_images = {os.path.basename(r['image_path']): r['similarity'] for r in hsv_results[:10]}
+            convnext_images = {os.path.basename(r['image_path']): r['similarity'] for r in convnext_results[:10]}
+            
+            # Check for any overlap in top results
+            common_in_top10 = set(hsv_images.keys()).intersection(set(convnext_images.keys()))
+            
+            print(f"\nMULTI-FEATURE ANALYSIS:")
+            print(f"  Common images in top-10: {len(common_in_top10)}")
+            
+            if common_in_top10:
+                print(f"  Potential multi-feature candidates:")
+                for img in list(common_in_top10)[:3]:
+                    hsv_score = hsv_images[img]
+                    convnext_score = convnext_images[img]
+                    combined_weighted = hsv_score * 0.469 + convnext_score * 0.531
+                    print(f"    {img}: HSV={hsv_score:.3f}, ConvNeXt={convnext_score:.3f}, Combined={combined_weighted:.3f}")
+            else:
+                print(f"  No overlap between HSV and ConvNeXt top-10 results")
+                print(f"  But integrated search found multi-feature matches through clustering")
+                
+                
+            # DELETE Show integrated vs individual comparison
+            integrated_images = {os.path.basename(r['image_path']) for r in integrated_results[:5]}
+            hsv_overlap = len(hsv_images.keys() & integrated_images)
+            convnext_overlap = len(convnext_images.keys() & integrated_images)
+            
+            print(f"\nINTEGRATED vs INDIVIDUAL OVERLAP:")
+            print(f"  HSV overlap with integrated: {hsv_overlap}/5")
+            print(f"  ConvNeXt overlap with integrated: {convnext_overlap}/5")
 
-    def display_results(self, target_image_path, similar_images):
-        n_images = len(similar_images) + 1
-        fig, axes = plt.subplots(1, n_images, figsize=(4 * n_images, 5))
+    def display_results(self, target_image_path, similar_images, target_features):
+    
+        # Get individual rankings
+        individual_rankings = self.get_individual_rankings(target_features, top_k=5)
         
-        if n_images == 1:
-            axes = [axes]
+        # Create subplots: 3 rows x 5 columns
+        fig, axes = plt.subplots(3, 5, figsize=(16, 8))
         
-        plt.suptitle("Interactive Image Similarity Search", fontsize=16)
+        plt.suptitle("Image Similarity Search - Integrated vs Individual Features", fontsize=14)
         
-        # Display target image
+        # Row 1: Query + Top 4 Integrated Results
+        # Query image
         try:
             target_img = Image.open(target_image_path)
-            axes[0].imshow(target_img)
-            axes[0].set_title(f"Query Image\n{os.path.basename(target_image_path)}", fontsize=12)
-            axes[0].axis('off')
+            axes[0, 0].imshow(target_img)
+            axes[0, 0].set_title(f"Query Image\n{os.path.basename(target_image_path)}", fontsize=10)
+            axes[0, 0].axis('off')
         except:
-            axes[0].text(0.5, 0.5, "Query\nImage Error", ha='center', va='center')
-            axes[0].axis('off')
+            axes[0, 0].text(0.5, 0.5, "Query\nImage Error", ha='center', va='center')
+            axes[0, 0].axis('off')
         
-        # Display similar images
-        for i, result in enumerate(similar_images):
-            if i + 1 >= len(axes):
-                break
-            
-            image_path = result['image_path']
-            similarity = result['combined_similarity']
-            
-            resolved_path = self.resolve_image_path(image_path)
-            
-            if resolved_path and os.path.exists(resolved_path):
-                try:
-                    img = Image.open(resolved_path)
-                    axes[i + 1].imshow(img)
-                    title_text = f"Rank {i + 1}\nScore: {similarity:.3f}"
-                    axes[i + 1].set_title(title_text, fontsize=10)
-                    axes[i + 1].axis('off')
-                except:
-                    axes[i + 1].text(0.5, 0.5, f"Rank {i + 1}\nError", ha='center', va='center')
-                    axes[i + 1].axis('off')
+        # Top 4 integrated results
+        for i in range(4):
+            col = i + 1
+            if i < len(similar_images):
+                result = similar_images[i]
+                image_path = result['image_path']
+                similarity = result['combined_similarity']
+                
+                resolved_path = self.resolve_image_path(image_path)
+                
+                if resolved_path and os.path.exists(resolved_path):
+                    try:
+                        img = Image.open(resolved_path)
+                        axes[0, col].imshow(img)
+                        axes[0, col].set_title(f"Integrated #{i+1}\nScore: {similarity:.3f}", fontsize=9)
+                        axes[0, col].axis('off')
+                    except:
+                        axes[0, col].text(0.5, 0.5, f"Int #{i+1}\nError", ha='center', va='center')
+                        axes[0, col].axis('off')
+                else:
+                    axes[0, col].text(0.5, 0.5, f"Int #{i+1}\nNot Found", ha='center', va='center')
+                    axes[0, col].axis('off')
             else:
-                axes[i + 1].text(0.5, 0.5, f"Rank {i + 1}\nNot Found", ha='center', va='center')
-                axes[i + 1].axis('off')
+                axes[0, col].axis('off')
+        
+        # Row 2: HSV-only results
+        axes[1, 0].text(0.5, 0.5, "HSV\nOnly", ha='center', va='center', fontsize=12, weight='bold')
+        axes[1, 0].axis('off')
+        
+        if 'hsv' in individual_rankings and individual_rankings['hsv']:
+            for i in range(4):
+                col = i + 1
+                if i < len(individual_rankings['hsv']):
+                    result = individual_rankings['hsv'][i]
+                    image_path = result['image_path']
+                    similarity = result['similarity']
+                    
+                    resolved_path = self.resolve_image_path(image_path)
+                    
+                    if resolved_path and os.path.exists(resolved_path):
+                        try:
+                            img = Image.open(resolved_path)
+                            axes[1, col].imshow(img)
+                            axes[1, col].set_title(f"HSV #{i+1}\nScore: {similarity:.3f}", fontsize=9)
+                            axes[1, col].axis('off')
+                        except:
+                            axes[1, col].text(0.5, 0.5, f"HSV #{i+1}\nError", ha='center', va='center')
+                            axes[1, col].axis('off')
+                    else:
+                        axes[1, col].text(0.5, 0.5, f"HSV #{i+1}\nNot Found", ha='center', va='center')
+                        axes[1, col].axis('off')
+                else:
+                    axes[1, col].axis('off')
+        else:
+            for i in range(1, 5):
+                axes[1, i].text(0.5, 0.5, "No HSV\nResults", ha='center', va='center')
+                axes[1, i].axis('off')
+        
+        # Row 3: ConvNeXt-only results  
+        axes[2, 0].text(0.5, 0.5, "ConvNeXt\nOnly", ha='center', va='center', fontsize=12, weight='bold')
+        axes[2, 0].axis('off')
+        
+        if 'convnext' in individual_rankings and individual_rankings['convnext']:
+            for i in range(4):
+                col = i + 1
+                if i < len(individual_rankings['convnext']):
+                    result = individual_rankings['convnext'][i]
+                    image_path = result['image_path']
+                    similarity = result['similarity']
+                    
+                    resolved_path = self.resolve_image_path(image_path)
+                    
+                    if resolved_path and os.path.exists(resolved_path):
+                        try:
+                            img = Image.open(resolved_path)
+                            axes[2, col].imshow(img)
+                            axes[2, col].set_title(f"ConvNeXt #{i+1}\nScore: {similarity:.3f}", fontsize=9)
+                            axes[2, col].axis('off')
+                        except:
+                            axes[2, col].text(0.5, 0.5, f"CNX #{i+1}\nError", ha='center', va='center')
+                            axes[2, col].axis('off')
+                    else:
+                        axes[2, col].text(0.5, 0.5, f"CNX #{i+1}\nNot Found", ha='center', va='center')
+                        axes[2, col].axis('off')
+                else:
+                    axes[2, col].axis('off')
+        else:
+            for i in range(1, 5):
+                axes[2, i].text(0.5, 0.5, "No ConvNeXt\nResults", ha='center', va='center')
+                axes[2, i].axis('off')
         
         plt.tight_layout()
         plt.show()
@@ -554,7 +592,7 @@ class InteractiveSimilaritySearch:
                 logging.info("No image selected")
                 return False
         
-        # Extract features
+        # Extract raw features
         target_features = self.extract_features_from_image(image_path)
         if target_features is None:
             logging.error("Failed to extract features")
@@ -567,8 +605,7 @@ class InteractiveSimilaritySearch:
             logging.info(f"Found {len(similar_images)} similar images")
             
             # Display results
-            self.display_results(image_path, similar_images)
-
+            self.display_results(image_path, similar_images, target_features)
             self.print_individual_rankings(target_features, similar_images, target_image_path=image_path)
             
             # Print text results
@@ -589,6 +626,7 @@ class InteractiveSimilaritySearch:
             logging.error("No similar images found")
             return False
 
+    
 def run_interactive_mode(image_path=None, use_cuda=True):
     try:
         searcher = InteractiveSimilaritySearch(use_cuda=use_cuda)
