@@ -7,11 +7,11 @@ import json
 import gc
 from contextlib import contextmanager
 import pickle
-#from db_api import get_feature_pickle_path
+
  
 # Base paths
 BASE_PATH = r"D:\Code_image_rec"
-PATH_TO_SSD =  r"D:\images" #r"E:\data"  
+PATH_TO_SSD =   r"E:\data"  #r"D:\images"
 
 # Database path (metadata.db is in the main directory)
 DB_PATH = os.path.join(BASE_PATH, 'metadata.db')
