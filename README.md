@@ -1,48 +1,143 @@
-# Image Similarity Search System
+# Here is an image similarity search system using ConvNeXt deep learning features & HSV color histograms with KMEANS clustering-optimized search. Last edit and library reqierements are of the year 2025. 
 
-A powerful image similarity search system using ConvNeXt deep learning features and HSV color histograms with clustering-optimized search.
 
-## 🚀 Quick Start
-
-### Prerequisites
+### Things you need for a start:
 - Python 3.8+
 - CUDA-capable GPU (optional, but recommended)
 - 4GB+ RAM
-- Images dataset directory
+- Images dataset directory. The program can traverse through nested folders.
+
+### Requirements:
+# Core Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Computer Vision and Image Processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scikit-image>=0.21.0
+
+# Machine Learning and Scientific Computing
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+
+# Data Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Progress Bars and UI
+tqdm>=4.66.0
+tkinter-utils>=0.1.0
+
+# High-Performance Search (Optional but Recommended)
+faiss-cpu>=1.7.4
+# For GPU support, use instead:
+# faiss-gpu>=1.7.4
+
+# Dimensionality Reduction
+umap-learn>=0.5.4
+
+# Model Hub and Pretrained Models
+timm>=0.9.0
 
 ### Installation
 
 1. **Clone the repository**
+git clone # Core Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Computer Vision and Image Processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scikit-image>=0.21.0
+
+# Machine Learning and Scientific Computing
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+
+# Data Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Progress Bars and UI
+tqdm>=4.66.0
+tkinter-utils>=0.1.0
+
+# High-Performance Search (Optional but Recommended)
+faiss-cpu>=1.7.4
+# For GPU support, use instead:
+# faiss-gpu>=1.7.4
+
+# Dimensionality Reduction
+umap-learn>=0.5.4
+
+# Model Hub and Pretrained Models
+timm>=0.9.0# Core Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Computer Vision and Image Processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scikit-image>=0.21.0
+
+# Machine Learning and Scientific Computing
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+
+# Data Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Progress Bars and UI
+tqdm>=4.66.0
+tkinter-utils>=0.1.0
+
+# For Search (Optional but Recommended)
+faiss-cpu>=1.7.4
+
+# For GPU support, use instead. Mind that in 2025 faiss-gpu is only installable for Linux:
+# faiss-gpu>=1.7.4
+
+# Dimensionality Reduction
+umap-learn>=0.5.4
+
+# Pretrained Model
+timm>=0.9.0
+
+1. **Clone this repository**:
 ```bash
-git clone <repository-url>
-cd image-similarity-search
+git clone git@github.com:Salt-is-leaving/Image-Recommender-App
+```
+3. **Install dependencies**
+```bash
+pip install -r requirements.txt
 ```
 
-2. **Install dependencies**
-```bash
-pip install torch torchvision timm
-pip install opencv-python pillow scikit-learn
-pip install numpy matplotlib seaborn tqdm
-pip install faiss-cpu  # or faiss-gpu for GPU acceleration
-```
-
-3. **Configure paths**
+5. **Configure paths**
 Edit `config.py` and update:
-```python
-PATH_TO_SSD = r"D:\your_images"  # Your images directory
+
+PATH_TO_SSD = r"D:\your_images"  
 BASE_PATH = r"D:\Code_image_rec"  # Project directory
 ```
 
 ### Directory Structure
 ```
 your-project/
-├── images/                 # Your image dataset (PATH_TO_SSD)
+├── images/                 # Image dataset (PATH_TO_SSD)
 ├── pickles/               # Generated feature files
 ├── metadata.db            # Image metadata database
 └── *.py                   # Application files
 ```
 
-## Available Modes
+## Available Modes. It's important to run the modes exactly in this order for the first run. Depending on the volume of your dataset and whether you set CUDA=True, the time for the learning mode might vary significantly. I recommend to compute  hsv_features.pkl on cpu and use batch processing of 32 or 64 for ConvNext features. 
 
 ### 1. **Learning Mode** (`--mode learning`)
 **Purpose**: Extract ConvNeXt and HSV features from all images in your dataset
@@ -56,9 +151,9 @@ python main.py --mode learning
 **What it does**:
 - Scans your image directory
 - Extracts 1024-dimensional ConvNeXt features
-- Extracts HSV color histograms
+- Extracts HSV color histograms with bin 8, 8, 16
 - Stores features in pickle files
-- Updates metadata database
+- Updates metadata database. You might need to make some adjustments to SQL-statements, if you dont use SQLite. 
 
 ---
 
@@ -67,6 +162,7 @@ python main.py --mode learning
 ```bash
 python main.py --mode clustering
 ```
+
 **Prerequisites**: Must run learning mode first
 
 **What it does**:
