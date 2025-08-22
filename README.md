@@ -46,7 +46,7 @@ BASE_PATH = r"D:\Code_image_rec"  # Project directory
 ```
 
 ### Directory Structure
-```
+``````bash
 your-project/
 ├── images/                 # Image dataset (PATH_TO_SSD)
 ├── pickles/               # Generated feature files
