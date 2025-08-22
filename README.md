@@ -1,4 +1,4 @@
-# Here is an image similarity search system using ConvNeXt deep learning features & HSV color histograms with KMEANS clustering-optimized search. Last edit and library reqierements are of the year 2025. 
+#### Here is an image similarity search system using ConvNeXt deep learning features & HSV color histograms with KMEANS clustering-optimized search. Last edit and library reqierements are of the year 2025. 
 
 
 ### Things you need for a start:
@@ -8,120 +8,36 @@
 - Images dataset directory. The program can traverse through nested folders.
 
 ### Requirements:
-# Core Deep Learning Framework
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
-
-# Computer Vision and Image Processing
 opencv-python>=4.8.0
 Pillow>=10.0.0
 scikit-image>=0.21.0
-
-# Machine Learning and Scientific Computing
 numpy>=1.24.0
 scipy>=1.11.0
 scikit-learn>=1.3.0
-
-# Data Visualization
 matplotlib>=3.7.0
 seaborn>=0.12.0
-
-# Progress Bars and UI
 tqdm>=4.66.0
 tkinter-utils>=0.1.0
-
-# High-Performance Search (Optional but Recommended)
 faiss-cpu>=1.7.4
-# For GPU support, use instead:
-# faiss-gpu>=1.7.4
-
-# Dimensionality Reduction
+# For GPU support, use faiss-gpu>=1.7.4 instead. In 2025 only works with Linux:
 umap-learn>=0.5.4
-
-# Model Hub and Pretrained Models
 timm>=0.9.0
 
 ### Installation
-
-1. **Clone the repository**
-git clone # Core Deep Learning Framework
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
-
-# Computer Vision and Image Processing
-opencv-python>=4.8.0
-Pillow>=10.0.0
-scikit-image>=0.21.0
-
-# Machine Learning and Scientific Computing
-numpy>=1.24.0
-scipy>=1.11.0
-scikit-learn>=1.3.0
-
-# Data Visualization
-matplotlib>=3.7.0
-seaborn>=0.12.0
-
-# Progress Bars and UI
-tqdm>=4.66.0
-tkinter-utils>=0.1.0
-
-# High-Performance Search (Optional but Recommended)
-faiss-cpu>=1.7.4
-# For GPU support, use instead:
-# faiss-gpu>=1.7.4
-
-# Dimensionality Reduction
-umap-learn>=0.5.4
-
-# Model Hub and Pretrained Models
-timm>=0.9.0# Core Deep Learning Framework
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
-
-# Computer Vision and Image Processing
-opencv-python>=4.8.0
-Pillow>=10.0.0
-scikit-image>=0.21.0
-
-# Machine Learning and Scientific Computing
-numpy>=1.24.0
-scipy>=1.11.0
-scikit-learn>=1.3.0
-
-# Data Visualization
-matplotlib>=3.7.0
-seaborn>=0.12.0
-
-# Progress Bars and UI
-tqdm>=4.66.0
-tkinter-utils>=0.1.0
-
-# For Search (Optional but Recommended)
-faiss-cpu>=1.7.4
-
-# For GPU support, use instead. Mind that in 2025 faiss-gpu is only installable for Linux:
-# faiss-gpu>=1.7.4
-
-# Dimensionality Reduction
-umap-learn>=0.5.4
-
-# Pretrained Model
-timm>=0.9.0
 
 1. **Clone this repository**:
 ```bash
 git clone git@github.com:Salt-is-leaving/Image-Recommender-App
 ```
-3. **Install dependencies**
+2. **Install dependencies**
 ```bash
 pip install -r requirements.txt
 ```
 
-5. **Configure paths**
+3. **Configure paths**
 Edit `config.py` and update:
 
 PATH_TO_SSD = r"D:\your_images"  
@@ -137,7 +53,7 @@ your-project/
 └── *.py                   # Application files
 ```
 
-## Available Modes. It's important to run the modes exactly in this order for the first run. Depending on the volume of your dataset and whether you set CUDA=True, the time for the learning mode might vary significantly. I recommend to compute  hsv_features.pkl on cpu and use batch processing of 32 or 64 for ConvNext features. 
+## Available Modes. It's important to run the modes exactly in this order for the first run. Depending on the volume of your dataset and whether you set CUDA=True, the time for the inference mode might vary significantly. I recommend to compute  hsv_features.pkl on CPU cause it takes significantly less time & use batch processing of 32 or 64 for ConvNext features. 
 
 ### 1. **Learning Mode** (`--mode learning`)
 **Purpose**: Extract ConvNeXt and HSV features from all images in your dataset
@@ -340,3 +256,5 @@ The system provides both individual feature comparisons and intelligent multi-fe
 - **Search**: FAISS-accelerated cluster-first similarity
 - **Weights**: Dynamic optimization based on feature quality
 - **Storage**: Pickle files + SQLite metadata
+
+
