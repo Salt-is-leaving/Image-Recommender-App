@@ -21,10 +21,11 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 tqdm>=4.66.0
 tkinter-utils>=0.1.0
-faiss-cpu>=1.7.4
-####  For GPU support, use faiss-gpu>=1.7.4 instead. In 2025 only works with Linux
-umap-learn>=0.5.4
+faiss-cpu>=1.7.4 
 timm>=0.9.0
+umap-learn>=0.5.4
+
+####  For GPU support, use faiss-gpu>=1.7.4 instead. In 2025 only works with Linux
 
 ### Installation
 
