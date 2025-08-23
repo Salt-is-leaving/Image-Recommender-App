@@ -51,7 +51,15 @@ your-project/
 ├── images/                 # Image dataset (PATH_TO_SSD)
 ├── pickles/               # Generated feature files
 ├── metadata.db            # Image metadata database
-└── *.py                   # Application files
+├── config.py                   # Application files
+├── main.py
+├── convnext_extractor.py
+├── feature_extraction_pipeline.py
+├── weight_optimizer.py
+├── clustering.py
+├── interactive_pipeline.py
+└── fearure_visualization.py
+
 ```
 
 ## Available Modes. It's important to run the modes exactly in this order for the first run. Depending on the volume of your dataset and whether you set CUDA=True, the time for the inference mode might vary significantly. I recommend to compute  hsv_features.pkl on CPU cause it takes significantly less time & use batch processing of 32 or 64 for ConvNext features. 
