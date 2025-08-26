@@ -61,8 +61,7 @@ your-project/
 └── fearure_visualization.py
 
 ```
-
-## Available Modes. It's important to run the modes exactly in this order for the first run. Depending on the volume of your dataset and whether you set CUDA=True, the time for the inference mode might vary significantly. I recommend to compute  hsv_features.pkl on CPU cause it takes significantly less time & use batch processing of 32 or 64 for ConvNext features. 
+### Available Modes. It's important to run the modes exactly in this order for the first run. Depending on the volume of your dataset and whether you set CUDA=True, the time for the inference mode might vary significantly. I recommend to compute  hsv_features.pkl on CPU cause it takes significantly less time & use batch processing of 32 or 64 for ConvNext features. 
 
 ### 1. **Learning Mode** (`--mode learning`)
 **Purpose**: Extract ConvNeXt and HSV features from all images in your dataset
@@ -81,7 +80,6 @@ python main.py --mode learning
 - Updates metadata database. You might need to make some adjustments to SQL-statements, if you dont use SQLite. 
 
 ---
-
 ### 2. **Clustering Mode** (`--mode clustering`)
 **Purpose**: Create optimized clusters for fast similarity search
 ```bash
@@ -116,7 +114,6 @@ python main.py --mode interactive --image-path "path/to/query.jpg"
 - Real-time feature extraction for new images
 
 ---
-
 ### 4. **Weight Analysis Mode** (`--mode weights`)
 **Purpose**: Analyze feature quality and optimize search weights
 ```bash
@@ -134,7 +131,6 @@ python main.py --mode weights --recalculate-weights
 - Feature correlation insights
 
 ---
-
 ### 5. **Visualization Mode** (`--mode vis`)
 **Purpose**: Visualize feature spaces using PCA projections
 ```bash
@@ -147,7 +143,7 @@ python main.py --mode vis
 - Correlation visualizations
 - Cluster distribution plots
 
-## 📋 System Commands
+## System Commands
 
 ### Check System Status
 ```bash
@@ -248,7 +244,7 @@ python main.py --mode learning --batch-size 16
    - Use visualization mode to understand feature spaces
    - Monitor logs for feature quality warnings
 
-## 📊 Example Output
+### Example Output
 
 After running all modes, you'll have:
 - **Database**: Image metadata and feature tracking
@@ -258,7 +254,7 @@ After running all modes, you'll have:
 
 The system provides both individual feature comparisons and intelligent multi-feature integration for the best similarity results.
 
-## Architecture
+### Architecture
 
 - **Features**: ConvNeXt-Base (1024D) + HSV histograms (288D)
 - **Clustering**: K-means with PCA dimensionality reduction
