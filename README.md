@@ -39,6 +39,7 @@ pip install -r requirements.txt
 ```
 
 3. **Configure paths**
+
 Edit `config.py` and update:
 
 PATH_TO_SSD = r"D:\your_images"  
